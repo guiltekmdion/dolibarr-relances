@@ -776,10 +776,68 @@ class DunningTest extends CommonClassTest
 		$customers = $dunning->getCustomers($this->savuser, $now);
 		$this->assertArrayNotHasKey($notyet, $customers, 'No level reached yet');
 		$customer = $customers[$due];
-		$this->assertSame(array(2, 240.0, 120.0, null, $levels[0], true, true), array($customer['nb'], $customer['remain'], $customer['late30'], $customer['level'], $customer['next']->rowid, $customer['due'], $customer['byhand']));
+		$this->assertSame(array(2, 240.0, 120.0, null, $levels[0], true, true), array($customer['nb'], $customer['remain'], $customer['aging_60'], $customer['level'], $customer['next']->rowid, $customer['due'], $customer['byhand']));
 		$this->assertSame(array(true, false), array($customers[$auto]['due'], $customers[$auto]['byhand']), 'Due, left to the job');
 		$customer = $customers[$sent];
 		$this->assertSame(array(1, $levels[0], $levels[10], false, false), array($customer['nb'], $customer['level']->rowid, $customer['next']->rowid, $customer['due'], $customer['byhand']), 'In the circuit, nothing to send now');
+	}
+
+	/**
+	 * Aged balance: not due (today included), 1-30, 31-60, 61-90 and more than 90 days late
+	 *
+	 * @return void
+	 */
+	public function testDunningAging()
+	{
+		$now = dol_now();
+		$today = dol_get_first_hour($now);
+		$rows = array();
+		foreach (array(5 => 1.0, 0 => 2.0, -1 => 4.0, -30 => 8.0, -31 => 16.0, -60 => 32.0, -61 => 64.0, -90 => 128.0, -91 => 256.0) as $days => $remain) {
+			$rows[] = (object) array('refdate' => dol_time_plus_duree($today, $days, 'd', 0, 'tzserver'), 'remain' => $remain);
+		}
+		$aging = (new Dunning($this->savdb))->getAging($rows, $now);
+		$this->assertSame(array('aging_notdue' => 3.0, 'aging_30' => 12.0, 'aging_60' => 48.0, 'aging_90' => 192.0, 'aging_more' => 256.0), $aging);
+	}
+
+	/**
+	 * Statement of account: all the invoices to pay of the customer, due or not, by age; nothing for a customer without invoice to pay;
+	 * attached to the email of a level that asks for it
+	 *
+	 * @return void
+	 */
+	public function testDunningStatement()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree(dol_now(), -60, 'd', 0, 'tzserver');
+		$hook = $this->captureMails();
+		$this->createLevels(array(0), array('joinnotice' => 2));
+		$socid = $this->createCustomer('statement@example.com');
+		$this->createInvoice($socid, -40);
+		$this->createInvoice($socid, 20);	// Not due: in the statement, never in the formal notice
+		$dunning = new Dunning($db);
+		$this->assertCount(2, $dunning->getInvoices($this->savuser, dol_now(), array($socid), 0, 0, true), 'All the invoices to pay');
+		$this->assertCount(1, $dunning->getInvoices($this->savuser, dol_now(), array($socid)), 'Not the one due later');
+		$soc = new Societe($db);
+		$soc->fetch($socid);
+		dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningstatement.modules.php');
+		$statement = new pdf_dunningstatement($db);
+
+		$this->assertSame(1, $statement->write_file($soc, $langs), (string) $statement->error);
+		$this->assertStringStartsWith($conf->societe->multidir_output[$conf->entity].'/'.$socid.'/statement-', $statement->result['fullpath']);
+		$this->assertGreaterThan(1000, dol_filesize($statement->result['fullpath']));
+		$empty = new Societe($db);
+		$empty->fetch($this->createCustomer('nostatement@example.com'));
+		$this->assertSame(0, $statement->write_file($empty, $langs), 'Nothing to pay');
+		$future = new Societe($db);
+		$future->fetch($this->createCustomer('statementfuture@example.com'));
+		$this->createInvoice($future->id, 20);
+		$this->assertSame(1, $statement->write_file($future, $langs), 'An invoice not due yet is in the statement');
+
+		$this->assertSame(0, $dunning->sendReminders(), implode(', ', $dunning->errors));
+		$this->assertCount(1, $hook->files);
+		$this->assertStringContainsString('statement-', implode(',', $hook->files[0]), 'Attached to the email of the level');
 	}
 
 	/**

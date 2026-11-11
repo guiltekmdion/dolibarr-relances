@@ -35,6 +35,11 @@ dol_include_once('/dunning/class/dunning.class.php');
 class pdf_dunningnotice extends ModeleThirdPartyDoc
 {
 	/**
+	 * @var bool True for the statement of account: all the invoices to pay and their age, without formal notice
+	 */
+	protected $statement = false;
+
+	/**
 	 * Constructor
 	 *
 	 * @param	DoliDB	$db		Database handler
@@ -81,27 +86,28 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 		}
 		$outputlangs->loadLangs(array('main', 'dict', 'companies', 'bills', 'dunning@dunning'));
 
-		// The late invoices of the customer, with the penalties due today
+		// The late invoices of the customer with the penalties due today, or all its invoices to pay for a statement
 		$dunning = new Dunning($this->db);
 		$now = dol_now();
-		$rows = $dunning->getInvoices($user, $now, array((int) $object->id));
+		$rows = $dunning->getInvoices($user, $now, array((int) $object->id), 0, 0, $this->statement);
 		if (!is_array($rows)) {
 			$this->error = $dunning->error;
 			return -1;
 		}
 		foreach ($rows as $id => $row) {
-			if ($row->refdate >= dol_get_first_hour($now)) {
+			if (!$this->statement && $row->refdate >= dol_get_first_hour($now)) {
 				unset($rows[$id]);
 			}
 		}
 		if (empty($rows)) {
-			$this->error = $outputlangs->trans('DunningNoticeNoLateInvoice');
+			$this->error = $outputlangs->trans($this->statement ? 'DunningStatementNoInvoice' : 'DunningNoticeNoLateInvoice');
 			return 0;
 		}
 		$subst = $dunning->getSubstitutions($rows, (object) array('label' => ''), $outputlangs, $now);
+		$prefix = ($this->statement ? 'DunningStatement' : 'DunningNotice');
 
 		$dir = $conf->societe->multidir_output[$object->entity ?: $conf->entity].'/'.((int) $object->id);
-		$file = $dir.'/'.dol_sanitizeFileName($outputlangs->transnoentitiesnoconv('DunningNoticeFile').'-'.dol_print_date($now, 'dayrfc')).'.pdf';
+		$file = $dir.'/'.dol_sanitizeFileName($outputlangs->transnoentitiesnoconv($prefix.'File').'-'.dol_print_date($now, 'dayrfc')).'.pdf';
 		if (dol_mkdir($dir) < 0) {
 			$this->error = $outputlangs->transnoentities('ErrorCanNotCreateDir', $dir);
 			return -1;
@@ -116,7 +122,7 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 		}
 		$pdf->SetFont(pdf_getPDFFont($outputlangs));
 		$pdf->Open();
-		$pdf->SetTitle($outputlangs->convToOutputCharset($outputlangs->transnoentities('DunningNoticeSubject')));
+		$pdf->SetTitle($outputlangs->convToOutputCharset($outputlangs->transnoentities($prefix.'Subject')));
 		$pdf->SetCreator('Dolibarr '.DOL_VERSION);
 		$pdf->SetMargins($this->marge_gauche, $this->marge_haute, $this->marge_droite);
 		$pdf->AddPage();
@@ -149,12 +155,25 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 
 		// Letter, with the table of the invoices of the reminders
 		$html = '<p style="text-align: right">'.dolPrintLabel(trim($mysoc->town.', '.dol_print_date($now, 'daytext', 'tzserver', $outputlangs), ', ')).'</p>';
-		$html .= '<p><b>'.$outputlangs->trans('DunningNoticeSubject').'</b></p>';
-		$html .= '<p>'.$outputlangs->trans('DunningNoticeIntro').'</p>'.$subst['__DUNNING_INVOICES__'];
+		$html .= '<p><b>'.$outputlangs->trans($prefix.'Subject').'</b></p>';
+		$html .= '<p>'.$outputlangs->trans($prefix.'Intro').'</p>'.$subst['__DUNNING_INVOICES__'];
 		$html .= '<p>'.$outputlangs->trans('DunningNoticeTotal', $subst['__DUNNING_TOTAL_REMAIN__']).'</p>';
-		$html .= ($subst['__DUNNING_PENALTIES_TEXT__'] !== '' ? '<p>'.dolPrintLabel($subst['__DUNNING_PENALTIES_TEXT__']).'</p>' : '');
-		$html .= '<p>'.$outputlangs->trans('DunningNoticeBody', $subst['__DUNNING_TOTAL_WITH_PENALTIES__']).'</p>';
-		$html .= '<p>'.$outputlangs->trans('DunningNoticeClosing').'</p><p>'.dolPrintLabel($mysoc->name).'</p>';
+		if ($this->statement) {	// The aged balance, then a simple closing
+			$html .= '<table border="1" cellpadding="4" style="border-collapse: collapse"><tr>';
+			$aging = $dunning->getAging($rows, $now);
+			foreach (array_keys($aging) as $key) {
+				$html .= '<th>'.$outputlangs->trans(Dunning::AGINGS[$key]).'</th>';
+			}
+			$html .= '</tr><tr>';
+			foreach ($aging as $amount) {
+				$html .= '<td style="text-align: right">'.price($amount, 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>';
+			}
+			$html .= '</tr></table>';
+		} else {
+			$html .= ($subst['__DUNNING_PENALTIES_TEXT__'] !== '' ? '<p>'.dolPrintLabel($subst['__DUNNING_PENALTIES_TEXT__']).'</p>' : '');
+			$html .= '<p>'.$outputlangs->trans('DunningNoticeBody', $subst['__DUNNING_TOTAL_WITH_PENALTIES__']).'</p>';
+		}
+		$html .= '<p>'.$outputlangs->trans($prefix.'Closing').'</p><p>'.dolPrintLabel($mysoc->name).'</p>';
 		$pdf->SetFont('', '', $fontsize - 1);
 		$pdf->writeHTMLCell($this->page_largeur - $this->marge_gauche - $this->marge_droite, 0, $this->marge_gauche, $this->marge_haute + 70, $html, 0, 1);
 

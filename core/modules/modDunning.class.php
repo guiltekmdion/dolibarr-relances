@@ -575,9 +575,11 @@ class modDunning extends DolibarrModules
 			}
 		}
 
-		// The formal notice in the document models of the thirdparties
-		$sql[] = "DELETE FROM ".$this->db->prefix()."document_model WHERE nom = 'dunningnotice' AND type = 'company' AND entity = ".((int) $conf->entity);
-		$sql[] = "INSERT INTO ".$this->db->prefix()."document_model (nom, type, entity) VALUES ('dunningnotice', 'company', ".((int) $conf->entity).")";
+		// The formal notice and the statement of account in the document models of the thirdparties
+		foreach (array('dunningnotice', 'dunningstatement') as $model) {
+			$sql[] = "DELETE FROM ".$this->db->prefix()."document_model WHERE nom = '".$model."' AND type = 'company' AND entity = ".((int) $conf->entity);
+			$sql[] = "INSERT INTO ".$this->db->prefix()."document_model (nom, type, entity) VALUES ('".$model."', 'company', ".((int) $conf->entity).")";
+		}
 
 		return $this->_init($sql, $options);
 	}
@@ -594,7 +596,7 @@ class modDunning extends DolibarrModules
 	{
 		global $conf;
 
-		$sql = array("DELETE FROM ".$this->db->prefix()."document_model WHERE nom = 'dunningnotice' AND type = 'company' AND entity = ".((int) $conf->entity));
+		$sql = array("DELETE FROM ".$this->db->prefix()."document_model WHERE nom IN ('dunningnotice', 'dunningstatement') AND type = 'company' AND entity = ".((int) $conf->entity));
 		return $this->_remove($sql, $options);
 	}
 }

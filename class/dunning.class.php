@@ -65,6 +65,11 @@ class Dunning
 	const CODE_PENALTY_INVOICE = 'AC_DUNNING_PENALTYINV';
 
 	/**
+	 * @var array<string,string> Ages of the aged balance and their language keys
+	 */
+	const AGINGS = array('aging_notdue' => 'DunningAgingNotDue', 'aging_30' => 'DunningAging30', 'aging_60' => 'DunningAging60', 'aging_90' => 'DunningAging90', 'aging_more' => 'DunningAgingMore');
+
+	/**
 	 * @var DoliDB Database handler
 	 */
 	public $db;
@@ -252,9 +257,10 @@ class Dunning
 	 * @param	int[]		$socids		Only the invoices of these thirdparties, all if empty
 	 * @param	int			$saleid		Only the customers of this sales representative
 	 * @param	int			$invoiceid	Only this invoice, even if no level is reached yet
+	 * @param	bool		$all		All the invoices to pay, even if no level is reached yet (statement of account)
 	 * @return	array<int,stdClass>|int<-1,-1>	Invoices by id (see computeState() for the state, plus promise and due), -1 if error
 	 */
-	public function getInvoices(User $user, $now, array $socids = array(), $saleid = 0, $invoiceid = 0)
+	public function getInvoices(User $user, $now, array $socids = array(), $saleid = 0, $invoiceid = 0, $all = false)
 	{
 		global $conf, $langs;
 
@@ -307,7 +313,7 @@ class Dunning
 		}
 		if ($invoiceid > 0) {
 			$sql .= " AND f.rowid = ".((int) $invoiceid);
-		} else {
+		} elseif (!$all) {
 			$sql .= " AND COALESCE(f.date_lim_reglement, f.datef) <= '".$this->db->idate(dol_time_plus_duree($today, -$first->nbdays, 'd', 0, 'tzserver'))."'";
 		}
 		if (!empty($socids)) {
@@ -627,7 +633,7 @@ class Dunning
 	 * @param	int		$now		Date of the reading
 	 * @param	int		$saleid		Only the customers of this sales representative
 	 * @param	int		$dueonly	1 = only the customers with a reminder to send
-	 * @return	array<int,array{socid:int,socname:string,nb:int,remain:float,late30:float,level:?stdClass,leveldate:int,promise:int,promisestatus:string,next:?stdClass,nextdate:int,due:bool,byhand:bool}>|int<-1,-1>	Customers by id, -1 if error
+	 * @return	array<int,array{socid:int,socname:string,nb:int,remain:float,aging_notdue:float,aging_30:float,aging_60:float,aging_90:float,aging_more:float,level:?stdClass,leveldate:int,promise:int,promisestatus:string,next:?stdClass,nextdate:int,due:bool,byhand:bool}>|int<-1,-1>	Customers by id, -1 if error
 	 */
 	public function getCustomers(User $user, $now, $saleid = 0, $dueonly = 0)
 	{
@@ -635,17 +641,18 @@ class Dunning
 		if (!is_array($rows)) {
 			return -1;
 		}
-		$late30 = dol_time_plus_duree(dol_get_first_hour($now), -30, 'd', 0, 'tzserver');
 		$customers = array();
 		foreach ($rows as $row) {
 			if (!$row->last && !$row->due && !$row->promise) {
 				continue;
 			}
-			$customer = $customers[$row->socid] ?? array('socid' => $row->socid, 'socname' => $row->socname, 'nb' => 0, 'remain' => 0.0, 'late30' => 0.0,
-				'level' => null, 'leveldate' => 0, 'promise' => 0, 'promisestatus' => '', 'next' => null, 'nextdate' => 0, 'due' => false, 'byhand' => false);
+			$customer = $customers[$row->socid] ?? array_merge(array('socid' => $row->socid, 'socname' => $row->socname, 'nb' => 0, 'remain' => 0.0,
+				'level' => null, 'leveldate' => 0, 'promise' => 0, 'promisestatus' => '', 'next' => null, 'nextdate' => 0, 'due' => false, 'byhand' => false), $this->getAging(array(), $now));
 			$customer['nb']++;
 			$customer['remain'] += $row->remain;
-			$customer['late30'] += ($row->refdate < $late30 ? $row->remain : 0);
+			foreach ($this->getAging(array($row), $now) as $key => $amount) {
+				$customer[$key] += $amount;
+			}
 			if ($row->last && (!$customer['level'] || $row->last->nbdays > $customer['level']->nbdays)) {
 				$customer['level'] = $row->last;
 				$customer['leveldate'] = $row->lastdate;
@@ -913,6 +920,25 @@ class Dunning
 		}
 
 		return implode(' + ', $texts);
+	}
+
+	/**
+	 * Aged balance of invoices: rest to pay not due yet, late 1 to 30 days, 31 to 60, 61 to 90, more than 90 (currency of the company)
+	 *
+	 * @param	stdClass[]	$rows	Invoices as returned by getInvoices()
+	 * @param	int			$now	Date of the reading
+	 * @return	array{aging_notdue:float,aging_30:float,aging_60:float,aging_90:float,aging_more:float}	Amounts by age
+	 */
+	public function getAging(array $rows, $now)
+	{
+		$aging = array_fill_keys(array_keys(self::AGINGS), 0.0);
+		foreach ($rows as $row) {
+			$days = $this->daysLate($row->refdate, $now);
+			$key = ($days <= 0 ? 'aging_notdue' : ($days <= 30 ? 'aging_30' : ($days <= 60 ? 'aging_60' : ($days <= 90 ? 'aging_90' : 'aging_more'))));
+			$aging[$key] += $row->remain;
+		}
+
+		return $aging;
 	}
 
 	/**
@@ -1197,9 +1223,10 @@ class Dunning
 			}
 		}
 
-		if ($level->joinnotice) {	// The formal notice of the customer, generated now with its late invoices
+		if ($level->joinnotice) {	// The formal notice (1) or the statement of account (2) of the customer, generated now
 			dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningnotice.modules.php');
-			$notice = new pdf_dunningnotice($this->db);
+			dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningstatement.modules.php');
+			$notice = ($level->joinnotice == 2 ? new pdf_dunningstatement($this->db) : new pdf_dunningnotice($this->db));
 			if ($notice->write_file($invoice->thirdparty, $outputlangs) <= 0) {
 				$this->errors[] = $refs.': '.$notice->error;
 				return 0;

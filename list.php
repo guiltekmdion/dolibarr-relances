@@ -87,7 +87,8 @@ $search_level = GETPOSTINT('search_level');
 $search_sale = GETPOSTINT('search_sale');
 $search_amount = GETPOST('search_amount', 'alpha');
 $search_due = GETPOSTINT('search_due');
-if (!in_array($sortfield, array('socname', 'nb', 'remain', 'late30', 'leveldate', 'promise', 'nextdate'))) {
+$agings = Dunning::AGINGS;
+if (!in_array($sortfield, array_merge(array('socname', 'nb', 'remain', 'leveldate', 'promise', 'nextdate'), array_keys($agings)))) {
 	$sortfield = 'nextdate';
 }
 // Names of the buttons of Form::showFilterButtons(), tested like the lists of the core for all browsers
@@ -196,6 +197,12 @@ foreach ($customers as $socid => $customer) {
 }
 $customers = dol_sort_array($customers, $sortfield, $sortorder);
 $nbtotalofrecords = count($customers);
+$totals = array_fill_keys(array_merge(array('remain'), array_keys($agings)), 0.0);	// Aged balance of all the customers of the list, not only of the page
+foreach ($customers as $customer) {
+	foreach ($totals as $key => $total) {
+		$totals[$key] += $customer[$key];
+	}
+}
 if ($limit * $page >= $nbtotalofrecords) {	// A filter reduced the list below the page asked
 	$page = 0;
 }
@@ -238,7 +245,7 @@ print '<div class="liste_titre liste_titre_bydiv centpercent">'.$moreforfilter.'
 
 print '<div class="div-table-responsive">';
 print '<table class="tagtable nobottomiftotal liste">';
-print '<tr class="liste_titre_filter"><td class="liste_titre" colspan="7"></td>';
+print '<tr class="liste_titre_filter"><td class="liste_titre" colspan="'.(6 + count($agings)).'"></td>';
 $parameters = array();
 $reshook = $hookmanager->executeHooks('printFieldListOption', $parameters, $dunning, $action); // Note that $action and $object may have been modified by hook
 print $hookmanager->resPrint;
@@ -247,7 +254,9 @@ print '<tr class="liste_titre">';
 print_liste_field_titre('Customer', $_SERVER['PHP_SELF'], 'socname', '', $param, '', $sortfield, $sortorder);
 print_liste_field_titre('Invoices', $_SERVER['PHP_SELF'], 'nb', '', $param, '', $sortfield, $sortorder, 'right ');
 print_liste_field_titre('RemainderToPay', $_SERVER['PHP_SELF'], 'remain', '', $param, '', $sortfield, $sortorder, 'right ');
-print_liste_field_titre('DunningLateMoreThan30Days', $_SERVER['PHP_SELF'], 'late30', '', $param, '', $sortfield, $sortorder, 'right ');
+foreach ($agings as $key => $label) {
+	print_liste_field_titre($label, $_SERVER['PHP_SELF'], $key, '', $param, '', $sortfield, $sortorder, 'right ');
+}
 print_liste_field_titre('DunningLevelReached', $_SERVER['PHP_SELF'], 'leveldate', '', $param, '', $sortfield, $sortorder);
 print_liste_field_titre('DunningPromise', $_SERVER['PHP_SELF'], 'promise', '', $param, '', $sortfield, $sortorder, 'center ');
 print_liste_field_titre('DunningNextReminder', $_SERVER['PHP_SELF'], 'nextdate', '', $param, '', $sortfield, $sortorder);
@@ -265,7 +274,9 @@ foreach ($customers as $customer) {
 	print '<td class="tdoverflowmax200">'.$societe->getNomUrl(1, 'customer').'</td>';
 	print '<td class="right">'.$customer['nb'].'</td>';
 	print '<td class="right amount">'.price($customer['remain'], 0, $langs, 1, -1, -1, $conf->currency).'</td>';
-	print '<td class="right amount">'.($customer['late30'] ? price($customer['late30'], 0, $langs, 1, -1, -1, $conf->currency) : '').'</td>';
+	foreach (array_keys($agings) as $key) {
+		print '<td class="right amount">'.($customer[$key] ? price($customer[$key], 0, $langs, 1, -1, -1, $conf->currency) : '').'</td>';
+	}
 	print '<td>'.($customer['level'] ? dolPrintLabel($customer['level']->label).' <span class="opacitymedium">'.dol_print_date($customer['leveldate'], 'day').'</span>' : '').'</td>';
 	print '<td class="center">'.($customer['promise'] ? dol_print_date($customer['promise'], 'day') : '');
 	print ($customer['promisestatus'] ? ' <span class="opacitymedium">('.$langs->trans('DunningPromise'.dol_ucfirst($customer['promisestatus'])).')</span>' : '').'</td>';
@@ -282,7 +293,13 @@ foreach ($customers as $customer) {
 	print '</tr>';
 }
 if ($num == 0) {
-	print '<tr><td colspan="8"><span class="opacitymedium">'.$langs->trans('NoRecordFound').'</span></td></tr>';
+	print '<tr><td colspan="'.(7 + count($agings)).'"><span class="opacitymedium">'.$langs->trans('NoRecordFound').'</span></td></tr>';
+} else {
+	print '<tr class="liste_total"><td>'.$langs->trans('Total').'</td><td></td>';
+	foreach ($totals as $total) {
+		print '<td class="right amount">'.price($total, 0, $langs, 1, -1, -1, $conf->currency).'</td>';
+	}
+	print '<td colspan="4"></td></tr>';
 }
 print '</table>';
 print '</div>';
