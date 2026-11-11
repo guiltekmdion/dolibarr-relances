@@ -2,13 +2,13 @@
 
 ## 1.5.0
 
-- Aged balance in the list of the customers (not due, 1-30, 31-60, 61-90 and over 90 days late) with a total line.
-- Statement of account: a PDF of the customer with all its invoices to pay and their age, from its Documents tab or attached by a level (setup: PDF attached = formal notice or statement).
-- Direct debits: no reminder while the request waits or the order is not credited, no level before the due date for an invoice or an installment paid by direct debit; after a rejection the reminders go on.
+- Aged balance in the list of the customers (not due, 1-30, 31-60, 61-90 and over 90 days late) of the invoices in the reminder circuit, with a total line.
+- Statement of account: a PDF of the customer with all its invoices to pay as a whole (disputed, excluded customers and direct debits included) and their age, from its Documents tab or attached by a level (setup: PDF attached = formal notice or statement).
+- Direct debits: no reminder while the request waits or the order is not credited (with a payment schedule: the request of the installment reminded, not the one of a later installment), no level before the due date for an invoice or an installment paid by direct debit; after a rejection the reminders go on.
 - With the module Payment schedules (1.1.0 or later, technical name `installments`): an installment is known by its due date, its levels are kept when the schedule is saved again; with the module disabled, all the levels sent count; schedules that can not be read leave the invoices reminded as a whole.
 - Once the penalty invoice is created, the reminders of the invoice no longer ask for the penalties, and a penalty invoice owes none.
-- Public email templates only; the email templates of the module are created once (a template deleted by the user does not come back at the next activation).
-- Checked with phpcs, phpstan and phan of Dolibarr; tests on MySQL and PostgreSQL, Dolibarr 24.0 and develop.
+- Public email templates only; the email templates of the module are created once (a template deleted by the user after the first activation of 1.5.0 does not come back).
+- Checked with phpcs, phpstan and phan with the setup of Dolibarr, by `build/check.sh` in the CI too; tests on MySQL and PostgreSQL, Dolibarr 24.0 and develop.
 
 ## 1.4.0
 

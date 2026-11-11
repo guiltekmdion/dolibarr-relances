@@ -31,6 +31,7 @@ require_once dirname(__FILE__).'/../../class/dunning.class.php';
 require_once dirname(__FILE__).'/../../class/actions_dunning.class.php';
 require_once dirname(__FILE__).'/../../core/substitutions/functions_dunning.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
+require_once DOL_DOCUMENT_ROOT.'/compta/prelevement/class/bonprelevement.class.php';
 
 if (empty($user->id)) {
 	print "Load permissions for admin user nb 1\n";
@@ -817,8 +818,11 @@ class DunningTest extends CommonClassTest
 		$this->createInvoice($socid, -40);
 		$this->createInvoice($socid, 20);	// Not due: in the statement, never in the formal notice
 		$dunning = new Dunning($db);
-		$this->assertCount(2, $dunning->getInvoices($this->savuser, dol_now(), array($socid), 0, 0, true), 'All the invoices to pay');
-		$this->assertCount(1, $dunning->getInvoices($this->savuser, dol_now(), array($socid)), 'Not the one due later');
+		$this->createInvoice($socid, -10, 'dispute_status = 1');
+		$waiting = $this->createInvoice($socid, -10);
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."prelevement_demande (entity, fk_facture, sourcetype, amount, date_demande, traite, fk_user_demande) VALUES (1, ".((int) $waiting).", 'facture', 120, '".$db->idate(dol_now())."', 0, ".((int) $this->savuser->id).")"));
+		$this->assertCount(4, $dunning->getInvoices($this->savuser, dol_now(), array($socid), 0, 0, true), 'All the invoices to pay, disputed or by direct debit too');
+		$this->assertCount(1, $dunning->getInvoices($this->savuser, dol_now(), array($socid)), 'Reminded: not the one due later, disputed or by direct debit');
 		$soc = new Societe($db);
 		$soc->fetch($socid);
 		dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningstatement.modules.php');
@@ -1519,7 +1523,7 @@ class DunningTest extends CommonClassTest
 		$p = $db->prefix();
 		foreach (array(
 			"CREATE TEMPORARY TABLE ".$p."installments_schedule (rowid integer, element varchar(32), fk_element integer, billing integer)",
-			"CREATE TEMPORARY TABLE ".$p."installments_line (rowid integer, fk_schedule integer, rang integer, date_due date, amount numeric(24,8), status integer, fk_mode_reglement integer)",
+			"CREATE TEMPORARY TABLE ".$p."installments_line (rowid integer, fk_schedule integer, rang integer, date_due date, amount numeric(24,8), status integer, fk_mode_reglement integer, fk_prelevement_demande integer)",
 		) as $sql) {
 			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
 		}
@@ -1535,7 +1539,7 @@ class DunningTest extends CommonClassTest
 		$days = array();
 		foreach (array(990011 => -20, 990012 => -5, 990013 => 40) as $lineid => $nb) {
 			$days[$nb] = substr($db->idate(dol_time_plus_duree($today, $nb, 'd')), 0, 10);
-			$this->assertTrue((bool) $db->query("INSERT INTO ".$p."installments_line VALUES (".$lineid.", 990001, 0, '".$days[$nb]."', 40, 0, 0)"));
+			$this->assertTrue((bool) $db->query("INSERT INTO ".$p."installments_line VALUES (".$lineid.", 990001, 0, '".$days[$nb]."', 40, 0, 0, NULL)"));
 		}
 		$conf->global->DUNNING_PENALTY_RATE = '10';
 		$conf->global->DUNNING_FIXED_INDEMNITY = '40';
@@ -1564,6 +1568,16 @@ class DunningTest extends CommonClassTest
 		$this->assertCount(1, $hook->mails, 'Once per installment');
 		$row = $dunning->getInvoices($this->savuser, $now, array($socid))[$id];
 		$this->assertSame(array($levels[15], 0), array($row->last->rowid ?? 0, $row->next->rowid ?? 0), 'Its last level sent');
+		$sqlrequest = "INSERT INTO ".$p."prelevement_demande (entity, fk_facture, sourcetype, amount, date_demande, traite, fk_user_demande) VALUES (1, ".((int) $id).", 'facture', 40, '".$db->idate($now)."', 0, ".((int) $this->savuser->id).")";
+		$this->assertTrue((bool) $db->query($sqlrequest));
+		$request = (int) $db->last_insert_id($p.'prelevement_demande');
+		$this->assertTrue((bool) $db->query("UPDATE ".$p."installments_line SET fk_prelevement_demande = ".$request." WHERE date_due = '".$days[40]."'"));
+		$this->assertArrayHasKey($id, $dunning->getInvoices($this->savuser, $now, array($socid)), 'The request of a later installment does not stop the late one');
+		$this->assertTrue((bool) $db->query("UPDATE ".$p."installments_line SET fk_prelevement_demande = ".$request." WHERE date_due = '".$days[-20]."'"));
+		$this->assertArrayNotHasKey($id, $dunning->getInvoices($this->savuser, $now, array($socid)), 'The request of the installment reminded stops it');
+		$this->assertTrue((bool) $db->query("UPDATE ".$p."installments_line SET fk_prelevement_demande = NULL"));
+		$this->assertArrayNotHasKey($id, $dunning->getInvoices($this->savuser, $now, array($socid)), 'A request made on the invoice stops it');
+		$this->assertTrue((bool) $db->query("DELETE FROM ".$p."prelevement_demande WHERE rowid = ".$request));
 		$this->assertTrue((bool) $db->query("UPDATE ".$p."installments_line SET rowid = rowid + 10 WHERE fk_schedule = 990001"));	// The schedule saved again
 		$row = $dunning->getInvoices($this->savuser, $now, array($socid))[$id];
 		$this->assertSame(array($levels[15], 0), array($row->last->rowid ?? 0, $row->next->rowid ?? 0), 'The same installment for the module: same date');

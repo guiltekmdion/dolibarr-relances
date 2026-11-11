@@ -350,6 +350,7 @@ class modDunning extends DolibarrModules
 		// Add here entries to declare new menus
 		/* BEGIN MODULEBUILDER TOPMENU */
 		// No top menu: the list of the customers to remind is in the left menu of Billing
+		// @phpstan-ignore-next-line	(shape of the ModuleBuilder template: 'prefix' is read by DolibarrModules::insert_menus(), not declared in its type)
 		$this->menu[$r++] = array(
 			'fk_menu' => 'fk_mainmenu=billing', // Will be stored into mainmenu + leftmenu. Use '' if this is a top menu. For left menu, use 'fk_mainmenu=xxx' or 'fk_mainmenu=xxx,fk_leftmenu=yyy' where xxx is mainmenucode and yyy is a leftmenucode
 			'type' => 'left', // This is a Left menu entry

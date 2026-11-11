@@ -29,7 +29,6 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/date.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/lib/payments.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
-require_once DOL_DOCUMENT_ROOT.'/compta/prelevement/class/bonprelevement.class.php';
 require_once DOL_DOCUMENT_ROOT.'/categories/class/categorie.class.php';
 require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
 require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
@@ -260,7 +259,7 @@ class Dunning
 	 * @param	int[]		$socids		Only the invoices of these thirdparties, all if empty
 	 * @param	int			$saleid		Only the customers of this sales representative
 	 * @param	int			$invoiceid	Only this invoice, even if no level is reached yet
-	 * @param	bool		$all		All the invoices to pay, even if no level is reached yet (statement of account)
+	 * @param	bool		$all		All the invoices to pay, as a whole, even if no level is reached yet, disputed, excluded or by direct debit (statement of account)
 	 * @return	array<int,stdClass>|int<-1,-1>	Invoices by id (see computeState() for the state, plus promise and due), -1 if error
 	 */
 	public function getInvoices(User $user, $now, array $socids = array(), $saleid = 0, $invoiceid = 0, $all = false)
@@ -279,7 +278,7 @@ class Dunning
 			return -1;
 		}
 		$first = reset($levels);	// Fewest days, active or not: computeState() chooses the next level
-		if (!$first) {
+		if (!$first && !$all) {
 			return array();
 		}
 		$today = dol_get_first_hour($now);
@@ -306,11 +305,10 @@ class Dunning
 		$sql .= " WHERE f.entity IN (".getEntity('invoice', 0).")";	// One entity per run, like the reminder job of the core
 		$sql .= " AND f.fk_statut = ".((int) Facture::STATUS_VALIDATED)." AND f.paye = 0";
 		$sql .= " AND f.type IN (".$this->db->sanitize(Facture::TYPE_STANDARD.", ".Facture::TYPE_REPLACEMENT.", ".Facture::TYPE_DEPOSIT.", ".Facture::TYPE_SITUATION).")";
-		$sql .= " AND COALESCE(f.dispute_status, 0) <> 1";
-		// A direct debit in progress (request waiting, or order not credited yet): the bank takes the money, no reminder. After a rejection, again.
-		$sql .= " AND NOT EXISTS (SELECT pd.rowid FROM ".$this->db->prefix()."prelevement_demande as pd LEFT JOIN ".$this->db->prefix()."prelevement_bons as pb ON pb.rowid = pd.fk_prelevement_bons";
-		$sql .= " WHERE pd.fk_facture = f.rowid AND (pd.traite = 0 OR pb.statut IN (".((int) BonPrelevement::STATUS_DRAFT).", ".((int) BonPrelevement::STATUS_TRANSFERED).")))";
-		if (getDolGlobalInt('DUNNING_EXCLUDED_CATEGORY') > 0) {	// Also when the module Tags is disabled later
+		if (!$all) {
+			$sql .= " AND COALESCE(f.dispute_status, 0) <> 1";
+		}
+		if (getDolGlobalInt('DUNNING_EXCLUDED_CATEGORY') > 0 && !$all) {	// Also when the module Tags is disabled later
 			$sql .= " AND NOT EXISTS (SELECT cs.fk_soc FROM ".$this->db->prefix()."categorie_societe as cs";
 			$sql .= " WHERE cs.fk_soc = f.fk_soc AND cs.fk_categorie = ".getDolGlobalInt('DUNNING_EXCLUDED_CATEGORY').")";
 		}
@@ -368,8 +366,14 @@ class Dunning
 		if (empty($rows)) {
 			return array();
 		}
-		if (isModEnabled('installments')) {
+		if (isModEnabled('installments') && !$all) {
 			$this->applyInstallments($rows, $today, $decimals);
+		}
+		if (!$all && $this->forgetDirectDebitsInProgress($rows) < 0) {
+			return -1;
+		}
+		if (empty($rows)) {
+			return array();
 		}
 		$this->markPenaltyInvoices($rows);
 
@@ -463,7 +467,7 @@ class Dunning
 	 */
 	private function applyInstallments(array &$rows, $today, $decimals)
 	{
-		$sql = "SELECT s.fk_element, l.date_due, l.amount, l.fk_mode_reglement FROM ".$this->db->prefix()."installments_line as l";
+		$sql = "SELECT s.fk_element, l.date_due, l.amount, l.fk_mode_reglement, l.fk_prelevement_demande FROM ".$this->db->prefix()."installments_line as l";
 		$sql .= " INNER JOIN ".$this->db->prefix()."installments_schedule as s ON s.rowid = l.fk_schedule";
 		$sql .= " WHERE s.element = 'facture' AND s.billing = 0 AND l.status <> 9";	// 9: installment abandoned
 		$sql .= " AND s.fk_element IN (".$this->db->sanitize(implode(',', array_map('intval', array_keys($rows)))).")";
@@ -477,12 +481,13 @@ class Dunning
 		$left = array();
 		while ($obj = $this->db->fetch_object($resql)) {
 			$id = (int) $obj->fk_element;
+			$rows[$id]['installmentdebits'][] = (int) $obj->fk_prelevement_demande;	// The requests of the module: the ones of the other installments do not stop this one
 			$left[$id] ??= $rows[$id]['paid'];
 			$paid = min((float) $obj->amount, max(0.0, $left[$id]));
 			$left[$id] -= $paid;
 			if (round((float) $obj->amount - $paid, $decimals) > 0) {
 				$unpaid[$id][] = array(substr((string) $obj->date_due, 0, 10), dol_get_first_hour((int) $this->db->jdate($obj->date_due)), round((float) $obj->amount - $paid, $decimals), (float) $obj->amount,
-					(int) $obj->fk_mode_reglement);
+					(int) $obj->fk_mode_reglement, (int) $obj->fk_prelevement_demande);
 			}
 		}
 		foreach ($unpaid as $id => $installments) {
@@ -501,6 +506,7 @@ class Dunning
 			$ratio = ($rows[$id]['total_ttc'] != 0 ? $rows[$id]['mc_total'] / $rows[$id]['total_ttc'] : 1.0);
 			$directdebit = ($installments[0][4] ? $installments[0][4] == $this->getDirectDebitMode() : $rows[$id]['directdebit']);	// Mode of the installment, else of the invoice
 			$rows[$id] = array_merge($rows[$id], array('installment' => $installments[0][0], 'refdate' => $installments[0][1], 'remain' => $remain, 'installments' => $late, 'directdebit' => $directdebit,
+				'installmentdebit' => $installments[0][5],
 				'mc_remain' => round($remain * $ratio, $decimals), 'mc_installments' => round($amount * $ratio, $decimals)));
 		}
 
@@ -538,6 +544,39 @@ class Dunning
 	}
 
 	/**
+	 * A direct debit in progress (request waiting, or its order not credited yet): the bank takes the money, no reminder; after a rejection,
+	 * the reminders go on. With a payment schedule, only the request of the installment reminded (or a request made on the invoice by hand)
+	 * stops it, not the one of a later installment.
+	 *
+	 * @param	array<int,array<string,mixed>>	$rows	Invoices being read by getInvoices(), changed in place
+	 * @return	int										0 if OK, -1 if error
+	 */
+	private function forgetDirectDebitsInProgress(array &$rows)
+	{
+		if (empty($rows)) {
+			return 0;
+		}
+		$sql = "SELECT pd.rowid, pd.fk_facture FROM ".$this->db->prefix()."prelevement_demande as pd";
+		$sql .= " LEFT JOIN ".$this->db->prefix()."prelevement_bons as pb ON pb.rowid = pd.fk_prelevement_bons";
+		$sql .= " WHERE pd.fk_facture IN (".$this->db->sanitize(implode(',', array_map('intval', array_keys($rows)))).")";
+		$sql .= " AND (pd.traite = 0 OR pb.statut IN (0, 1))";	// BonPrelevement::STATUS_DRAFT and STATUS_TRANSFERED: not credited yet
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+		while ($obj = $this->db->fetch_object($resql)) {
+			$id = (int) $obj->fk_facture;
+			$row = $rows[$id] ?? null;
+			if ($row && ((int) $obj->rowid == ($row['installmentdebit'] ?? 0) || !in_array((int) $obj->rowid, $row['installmentdebits'] ?? array()))) {	// Without schedule: any request
+				unset($rows[$id]);
+			}
+		}
+
+		return 0;
+	}
+
+	/**
 	 * The invoices of penalties made by the module owe no penalties themselves: an event on their invoice of origin keeps their id
 	 *
 	 * @param	array<int,array<string,mixed>>	$rows	Invoices being read by getInvoices(), changed in place
@@ -558,12 +597,13 @@ class Dunning
 	/**
 	 * Id of the payment mode "direct debit" (code PRE)
 	 *
-	 * @return	int		Id, 0 if none
+	 * @return	int		Id, -1 if none
 	 */
 	private function getDirectDebitMode()
 	{
 		if (!isset($this->directdebitmode)) {
-			$this->directdebitmode = max(0, (int) dol_getIdFromCode($this->db, 'PRE', 'c_paiement', 'code', 'id', 1));
+			$this->directdebitmode = (int) dol_getIdFromCode($this->db, 'PRE', 'c_paiement', 'code', 'id', 1);
+			$this->directdebitmode = ($this->directdebitmode > 0 ? $this->directdebitmode : -1);	// Never the mode 0 of an invoice without mode
 		}
 
 		return $this->directdebitmode;
