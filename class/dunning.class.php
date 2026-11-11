@@ -29,6 +29,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/date.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/lib/payments.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
+require_once DOL_DOCUMENT_ROOT.'/compta/prelevement/class/bonprelevement.class.php';
 require_once DOL_DOCUMENT_ROOT.'/categories/class/categorie.class.php';
 require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
 require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
@@ -92,6 +93,11 @@ class Dunning
 	 * @var array<string,CEmailTemplate|ModelMail|int> Email templates by level and language, searched once per run
 	 */
 	private $templates = array();
+
+	/**
+	 * @var int Id of the payment mode "direct debit", read once
+	 */
+	private $directdebitmode;
 
 
 	/**
@@ -204,9 +210,10 @@ class Dunning
 	 * @param	int					$promise	Date of the payment promise, 0 if none
 	 * @param	int					$startdate	Levels reached before this date are not sent automatically
 	 * @param	int					$today		First hour of the day of the reading
+	 * @param	bool				$beforedue	False for a direct debit: no level before the due date, the bank takes the money that day
 	 * @return	stdClass			Object with last (level), lastdate, next (level), nextdate and auto (next level can be sent by the job: reached after the start date and not by hand)
 	 */
-	public function computeState(array $levels, $refdate, array $sent, $promise, $startdate, $today)
+	public function computeState(array $levels, $refdate, array $sent, $promise, $startdate, $today, $beforedue = true)
 	{
 		$state = (object) array('last' => null, 'lastdate' => 0, 'next' => null, 'nextdate' => 0, 'auto' => false);
 		foreach ($sent as $levelid => $datep) {
@@ -216,7 +223,7 @@ class Dunning
 			}
 		}
 		foreach ($levels as $level) {
-			if ($level->active && (!$state->last || $level->nbdays > $state->last->nbdays) && ($level->nbdays >= 0 || $refdate > $today)) {
+			if ($level->active && (!$state->last || $level->nbdays > $state->last->nbdays) && ($level->nbdays >= 0 || ($refdate > $today && $beforedue))) {
 				$state->next = $level;
 				break;
 			}
@@ -270,7 +277,7 @@ class Dunning
 		$startdate = dol_get_first_hour(getDolGlobalInt('DUNNING_START_DATE') ?: $now);
 
 		// Amounts paid, credit notes and deposits used, like Societe::getOutstandingBills()
-		$sql = "SELECT f.rowid, f.ref, f.type, f.fk_soc, f.fk_projet, COALESCE(f.date_lim_reglement, f.datef) as refdate, f.total_ttc, f.last_main_doc,";
+		$sql = "SELECT f.rowid, f.ref, f.type, f.fk_soc, f.fk_projet, COALESCE(f.date_lim_reglement, f.datef) as refdate, f.total_ttc, f.last_main_doc, f.fk_mode_reglement,";
 		$sql .= " f.multicurrency_code, f.multicurrency_tx, f.multicurrency_total_ttc,";
 		$sql .= " f.retained_warranty, f.retained_warranty_date_limit,";
 		$sql .= " s.nom as socname, s.email, s.default_lang, s.tva_intra, s.siren, s.siret, s.ape, s.idprof4, s.idprof5, s.idprof6, s.euid, te.code as typent_code,";
@@ -291,6 +298,9 @@ class Dunning
 		$sql .= " AND f.fk_statut = ".((int) Facture::STATUS_VALIDATED)." AND f.paye = 0";
 		$sql .= " AND f.type IN (".$this->db->sanitize(Facture::TYPE_STANDARD.", ".Facture::TYPE_REPLACEMENT.", ".Facture::TYPE_DEPOSIT.", ".Facture::TYPE_SITUATION).")";
 		$sql .= " AND COALESCE(f.dispute_status, 0) <> 1";
+		// A direct debit in progress (request waiting, or order not credited yet): the bank takes the money, no reminder. After a rejection, again.
+		$sql .= " AND NOT EXISTS (SELECT pd.rowid FROM ".$this->db->prefix()."prelevement_demande as pd LEFT JOIN ".$this->db->prefix()."prelevement_bons as pb ON pb.rowid = pd.fk_prelevement_bons";
+		$sql .= " WHERE pd.fk_facture = f.rowid AND (pd.traite = 0 OR pb.statut IN (".((int) BonPrelevement::STATUS_DRAFT).", ".((int) BonPrelevement::STATUS_TRANSFERED).")))";
 		if (getDolGlobalInt('DUNNING_EXCLUDED_CATEGORY') > 0) {	// Also when the module Tags is disabled later
 			$sql .= " AND NOT EXISTS (SELECT cs.fk_soc FROM ".$this->db->prefix()."categorie_societe as cs";
 			$sql .= " WHERE cs.fk_soc = f.fk_soc AND cs.fk_categorie = ".getDolGlobalInt('DUNNING_EXCLUDED_CATEGORY').")";
@@ -336,7 +346,7 @@ class Dunning
 					'last_main_doc' => (string) $obj->last_main_doc, 'refdate' => $refdate, 'total_ttc' => (float) $obj->total_ttc, 'paid' => $paid, 'remain' => $remain,
 					'penaltysubject' => (!$obj->nopenalty && ($companies[$obj->fk_soc] = ($companies[$obj->fk_soc] ?? $this->isACompany($obj)))), 'penaltyinvoice' => 0,
 					'currency' => $conf->currency, 'mc_rate' => 1.0, 'mc_total' => (float) $obj->total_ttc, 'mc_paid' => $paid, 'mc_remain' => $remain,
-					'installment' => '', 'installments' => array());
+					'installment' => '', 'installments' => array(), 'directdebit' => ((int) $obj->fk_mode_reglement == $this->getDirectDebitMode()));
 				if ($obj->multicurrency_code && $obj->multicurrency_code != $conf->currency && (float) $obj->multicurrency_tx > 0) {	// Amounts in the currency of the invoice
 					$rows[(int) $obj->rowid] = array_merge($rows[(int) $obj->rowid], array('currency' => $obj->multicurrency_code, 'mc_rate' => (float) $obj->multicurrency_tx,
 						'mc_total' => (float) $obj->multicurrency_total_ttc, 'mc_remainbefore' => round((float) $obj->total_ttc - $paid, $decimals)));
@@ -381,7 +391,7 @@ class Dunning
 		}
 		$result = array();
 		foreach ($rows as $id => $row) {
-			$state = $this->computeState($levels, $row['refdate'], $sent[$id] ?? array(), $promise[$id] ?? 0, $startdate, $today);
+			$state = $this->computeState($levels, $row['refdate'], $sent[$id] ?? array(), $promise[$id] ?? 0, $startdate, $today, !$row['directdebit']);
 			$result[$id] = (object) array_merge($row, (array) $state, array('promise' => $promise[$id] ?? 0, 'due' => ($state->next && $state->nextdate <= $today),
 				'promiseamount' => ($promiseamount[$id][0] ?? 0.0), 'promisestatus' => ($promisestatus[$id] ?? '')));
 		}
@@ -445,7 +455,7 @@ class Dunning
 	 */
 	private function applyInstallments(array &$rows, $today, $decimals)
 	{
-		$sql = "SELECT s.fk_element, l.date_due, l.amount FROM ".$this->db->prefix()."installments_line as l";
+		$sql = "SELECT s.fk_element, l.date_due, l.amount, l.fk_mode_reglement FROM ".$this->db->prefix()."installments_line as l";
 		$sql .= " INNER JOIN ".$this->db->prefix()."installments_schedule as s ON s.rowid = l.fk_schedule";
 		$sql .= " WHERE s.element = 'facture' AND s.billing = 0 AND l.status <> 9";	// 9: installment abandoned
 		$sql .= " AND s.fk_element IN (".$this->db->sanitize(implode(',', array_map('intval', array_keys($rows)))).")";
@@ -463,7 +473,8 @@ class Dunning
 			$paid = min((float) $obj->amount, max(0.0, $left[$id]));
 			$left[$id] -= $paid;
 			if (round((float) $obj->amount - $paid, $decimals) > 0) {
-				$unpaid[$id][] = array(substr((string) $obj->date_due, 0, 10), dol_get_first_hour((int) $this->db->jdate($obj->date_due)), round((float) $obj->amount - $paid, $decimals), (float) $obj->amount);
+				$unpaid[$id][] = array(substr((string) $obj->date_due, 0, 10), dol_get_first_hour((int) $this->db->jdate($obj->date_due)), round((float) $obj->amount - $paid, $decimals), (float) $obj->amount,
+					(int) $obj->fk_mode_reglement);
 			}
 		}
 		foreach ($unpaid as $id => $installments) {
@@ -480,7 +491,8 @@ class Dunning
 			$remain = round($due ?: $installments[0][2], $decimals);
 			$amount = ($due ? $amount : $installments[0][3]);	// Amount of the installments reminded, shown in the email
 			$ratio = ($rows[$id]['total_ttc'] != 0 ? $rows[$id]['mc_total'] / $rows[$id]['total_ttc'] : 1.0);
-			$rows[$id] = array_merge($rows[$id], array('installment' => $installments[0][0], 'refdate' => $installments[0][1], 'remain' => $remain, 'installments' => $late,
+			$directdebit = ($installments[0][4] ? $installments[0][4] == $this->getDirectDebitMode() : $rows[$id]['directdebit']);	// Mode of the installment, else of the invoice
+			$rows[$id] = array_merge($rows[$id], array('installment' => $installments[0][0], 'refdate' => $installments[0][1], 'remain' => $remain, 'installments' => $late, 'directdebit' => $directdebit,
 				'mc_remain' => round($remain * $ratio, $decimals), 'mc_installments' => round($amount * $ratio, $decimals)));
 		}
 
@@ -533,6 +545,20 @@ class Dunning
 				$rows[$id]['penaltysubject'] = false;
 			}
 		}
+	}
+
+	/**
+	 * Id of the payment mode "direct debit" (code PRE)
+	 *
+	 * @return	int		Id, 0 if none
+	 */
+	private function getDirectDebitMode()
+	{
+		if (!isset($this->directdebitmode)) {
+			$this->directdebitmode = max(0, (int) dol_getIdFromCode($this->db, 'PRE', 'c_paiement', 'code', 'id', 1));
+		}
+
+		return $this->directdebitmode;
 	}
 
 	/**

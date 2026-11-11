@@ -141,6 +141,8 @@ class DunningTest extends CommonClassTest
 			"DELETE FROM ".$db->prefix()."actioncomm_resources WHERE fk_actioncomm IN (SELECT id FROM ".$db->prefix()."actioncomm WHERE fk_soc IN (".$socs."))",
 			"DELETE FROM ".$db->prefix()."actioncomm WHERE fk_soc IN (".$socs.")",
 			"DELETE FROM ".$db->prefix()."paiement_facture WHERE fk_facture IN (".$invoices.")",
+			"DELETE FROM ".$db->prefix()."prelevement_demande WHERE fk_facture IN (".$invoices.")",
+			"DELETE FROM ".$db->prefix()."prelevement_bons WHERE ref LIKE 'DUNTEST%'",
 			"DELETE FROM ".$db->prefix()."paiement WHERE ref = 'DUNNINGTEST'",
 			"DELETE FROM ".$db->prefix()."element_contact WHERE fk_socpeople IN (SELECT rowid FROM ".$db->prefix()."socpeople WHERE fk_soc IN (".$socs."))",
 			"DELETE FROM ".$db->prefix()."societe_remise_except WHERE fk_soc IN (".$socs.")",
@@ -223,6 +225,44 @@ class DunningTest extends CommonClassTest
 		$levels[2]->byhand = 1;
 		$state = $dunning->computeState($levels, $ref, array(1 => $ref - 5 * $day), 0, 0, $ref + 40 * $day);
 		$this->assertSame(array(2, false), array($state->next->rowid, $state->auto), 'level by hand');
+	}
+
+	/**
+	 * Direct debit: no reminder while the request waits or its order is not credited, none before the due date (the bank takes the money
+	 * that day); after a rejection (order credited, invoice unpaid again) the reminders go on
+	 *
+	 * @return void
+	 */
+	public function testDunningDirectDebit()
+	{
+		$db = $this->savdb;
+		$p = $db->prefix();
+		$levels = $this->createLevels(array(-3, 10));
+		$socid = $this->createCustomer('debit@example.com');
+		$pre = (int) dol_getIdFromCode($db, 'PRE', 'c_paiement', 'code', 'id', 1);
+		$this->assertGreaterThan(0, $pre);
+		$transfer = $this->createInvoice($socid, 2);
+		$debit = $this->createInvoice($socid, 2, 'fk_mode_reglement = '.$pre);
+		$ids = array();
+		foreach (array('waiting' => array(0, null), 'transmitted' => array(1, BonPrelevement::STATUS_TRANSFERED), 'rejected' => array(1, BonPrelevement::STATUS_CREDITED)) as $case => $debitstate) {
+			$ids[$case] = $this->createInvoice($socid, -15, 'fk_mode_reglement = '.$pre);
+			$order = 'NULL';
+			if ($debitstate[1] !== null) {
+				$this->assertTrue((bool) $db->query("INSERT INTO ".$p."prelevement_bons (ref, entity, datec, amount, statut) VALUES ('DUNTEST".$debitstate[1]."', 1, '".$db->idate(dol_now())."', 120, ".((int) $debitstate[1]).")"));
+				$order = (int) $db->last_insert_id($p.'prelevement_bons');
+			}
+			$sql = "INSERT INTO ".$p."prelevement_demande (entity, fk_facture, sourcetype, amount, date_demande, traite, fk_prelevement_bons, fk_user_demande)";
+			$sql .= " VALUES (1, ".((int) $ids[$case]).", 'facture', 120, '".$db->idate(dol_now())."', ".$debitstate[0].", ".$order.", ".((int) $this->savuser->id).")";
+			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+		}
+		$dunning = new Dunning($db);
+
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame(array($levels[-3], true), array($rows[$transfer]->next->rowid ?? 0, $rows[$transfer]->due), 'Bank transfer: the level before the due date');
+		$this->assertSame(array($levels[10], false), array($rows[$debit]->next->rowid ?? 0, $rows[$debit]->due), 'Direct debit: none before the due date');
+		$this->assertArrayNotHasKey($ids['waiting'], $rows, 'Request waiting');
+		$this->assertArrayNotHasKey($ids['transmitted'], $rows, 'Order sent to the bank, not credited');
+		$this->assertSame(array($levels[10], true), array($rows[$ids['rejected']]->next->rowid ?? 0, $rows[$ids['rejected']]->due), 'Rejected: reminded');
 	}
 
 	/**
@@ -1421,7 +1461,7 @@ class DunningTest extends CommonClassTest
 		$p = $db->prefix();
 		foreach (array(
 			"CREATE TEMPORARY TABLE ".$p."installments_schedule (rowid integer, element varchar(32), fk_element integer, billing integer)",
-			"CREATE TEMPORARY TABLE ".$p."installments_line (rowid integer, fk_schedule integer, rang integer, date_due date, amount numeric(24,8), status integer)",
+			"CREATE TEMPORARY TABLE ".$p."installments_line (rowid integer, fk_schedule integer, rang integer, date_due date, amount numeric(24,8), status integer, fk_mode_reglement integer)",
 		) as $sql) {
 			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
 		}
@@ -1437,7 +1477,7 @@ class DunningTest extends CommonClassTest
 		$days = array();
 		foreach (array(990011 => -20, 990012 => -5, 990013 => 40) as $lineid => $nb) {
 			$days[$nb] = substr($db->idate(dol_time_plus_duree($today, $nb, 'd')), 0, 10);
-			$this->assertTrue((bool) $db->query("INSERT INTO ".$p."installments_line VALUES (".$lineid.", 990001, 0, '".$days[$nb]."', 40, 0)"));
+			$this->assertTrue((bool) $db->query("INSERT INTO ".$p."installments_line VALUES (".$lineid.", 990001, 0, '".$days[$nb]."', 40, 0, 0)"));
 		}
 		$conf->global->DUNNING_PENALTY_RATE = '10';
 		$conf->global->DUNNING_FIXED_INDEMNITY = '40';
@@ -1474,6 +1514,9 @@ class DunningTest extends CommonClassTest
 		$row = $dunning->getInvoices($this->savuser, $now, array(), 0, $id)[$id];
 		$this->assertSame(array($days[40], dol_time_plus_duree($today, 40, 'd'), 40.0, 0), array($row->installment, $row->refdate, $row->remain, $row->last->rowid ?? 0));
 		$this->assertSame(array($levels[-3], false), array($row->next->rowid ?? 0, $row->due));
+		$this->assertTrue((bool) $db->query("UPDATE ".$p."installments_line SET fk_mode_reglement = ".((int) dol_getIdFromCode($db, 'PRE', 'c_paiement', 'code', 'id', 1))." WHERE date_due = '".$days[40]."'"));
+		$row = $dunning->getInvoices($this->savuser, $now, array(), 0, $id)[$id];
+		$this->assertSame($levels[15], $row->next->rowid ?? 0, 'This installment by direct debit: no level before its date');
 
 		unset($conf->modules['installments']);	// Module disabled: the invoice as a whole again, from the last level sent for any installment
 		$row = $dunning->getInvoices($this->savuser, $now, array(), 0, $id)[$id];
