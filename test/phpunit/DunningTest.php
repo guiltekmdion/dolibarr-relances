@@ -179,7 +179,7 @@ class DunningTest extends CommonClassTest
 
 		$module = new modDunning($db);
 
-		$this->assertSame(array('1.4.0', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
+		$this->assertSame(array('1.5.0', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
 		$this->assertTrue((bool) $db->query("SELECT rowid FROM ".$db->prefix()."dunning_level"), 'Enabling the module creates its table: '.$db->lasterror());
 		$this->assertSame(0, $module->cronjobs[0]['status']);
 		$this->assertSame(array('DUNNING_START_DATE', 1), array($module->const[0][0], $module->const[0][6]), 'A module enabled again does not send the past');

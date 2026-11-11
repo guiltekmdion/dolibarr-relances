@@ -9,15 +9,17 @@ The module sends reminder emails for the unpaid customer invoices, level after l
 - **Levels**: days after the due date (negative = before), label, recipient (a contact type of the invoice, else the email of the customer), email template, active or not.
   - **One email per customer**: the due invoices of a customer at this level go in one email, with the table of the invoices and their PDF.
   - **By hand**: the job never sends this level (a last notice before legal action, for example): it waits in the list until a user sends it.
-- **List Billing > Reminders**: one line per customer (invoices, rest to pay, over 30 days late, level reached, promise, next reminder), filters on the level, the sales representative, the amount and the customers to remind. Mass actions: send the due level, send one email per customer, payment promise, do not remind.
+- **List Billing > Reminders**: one line per customer (invoices, rest to pay, **aged balance**: not due, 1-30, 31-60, 61-90 and over 90 days late, with a total line; level reached, promise, next reminder), filters on the level, the sales representative, the amount and the customers to remind. Mass actions: send the due level, send one email per customer, payment promise, do not remind.
 - **Tab Reminders on the invoice**: level reached, next reminder, recipients, history, buttons to send the due level, record a payment promise, or open a dispute (a disputed invoice is never reminded).
 - **Payment promise**: no reminder up to the promised day, then the next level. With an amount (tab of the invoice), the promise is shown kept, pending or not kept according to the payments received since.
 - **Formal notice (PDF)**: a document model of the thirdparties (tab Documents of the customer, to print or send by registered mail): the late invoices of the customer, the penalties due and the bank details. A level can attach it to its email.
+- **Statement of account (PDF)**: all the invoices to pay of the customer, due or not, and their aged balance; from the tab Documents of the customer, or attached by a level instead of the formal notice.
 - **Customers never reminded**: a tag/category chosen in the setup (needs the module Tags/Categories).
 - **Home page**: a line "Customers to remind" in the Invoices block, which opens the list filtered on them.
 - **Ready to use**: at the first activation, 3 email templates in French and English (courtesy, reminder, formal notice) and 3 levels (3 days before the due date, 15 days after with one email per customer, 30 days after by hand).
 - **Late penalties and recovery indemnity** (France, between companies): annual rate and fixed indemnity in the setup, computed for each late invoice, shown in the emails and on the tab of the invoice; a button prepares a separate draft invoice of them.
-- **Invoices paid in several times**: with the free module [Payment schedules](https://github.com/guiltekmdion/dolibarr-echeances), an invoice with a schedule is reminded installment by installment (the oldest unpaid one, for the amount due), the levels start again from the first one at each new installment, the penalties run from the date of each installment.
+- **Invoices paid in several times**: with the free module [Payment schedules](https://github.com/guiltekmdion/dolibarr-echeances), an invoice with a schedule is reminded installment by installment (the oldest unpaid one, for the amount due), the levels start again from the first one at each new installment, the penalties run from the date of each installment. Payment schedules 1.1.0 or later (technical name `installments`).
+- **Direct debits**: no reminder while the direct debit request waits or its order is not credited; no level before the due date for an invoice or an installment paid by direct debit (the bank takes the money that day). After a rejection, the reminders go on.
 - **Statistics** (Billing > Reminders > Statistics): reminders sent and invoices reminded by month and by level, amount paid within 30 days after a reminder, average days from the first reminder to the full payment.
 - **Foreign currencies**: the emails and the formal notice show the amounts in the currency of each invoice (payments in this currency), one email per customer and currency; the list adds the amounts in the currency of the company.
 - **Keys in the email templates editor**: the `__DUNNING_*__` keys appear in the list of keys of the templates editor, and get their values when an invoice is sent by hand from its card.
@@ -25,7 +27,8 @@ The module sends reminder emails for the unpaid customer invoices, level after l
 ## Rules
 
 - The next level is the first active level after the most advanced level sent: never a jump back, never two levels the same day, and the gap between two levels is kept.
-- Reminded: validated unpaid invoices (standard, replacement, deposit, situation), except credit notes and invoices with a dispute open. A retained warranty is reminded from its own date.
+- Reminded: validated unpaid invoices (standard, replacement, deposit, situation), except credit notes, invoices with a dispute open and invoices whose direct debit is in progress. A retained warranty is reminded from its own date.
+- Once the penalty invoice is created, the reminders of the invoice no longer ask for the penalties; a penalty invoice owes none.
 - **First run of the job**: it sends nothing for the levels reached before it. They wait in the list for a user.
 - The email is sent first, then one event per invoice. Each email reads the events again just before it is sent, so a level is never sent twice.
 - The job does not run while the reminder job of Dolibarr (`sendEmailsRemindersOnInvoiceDueDate`) is enabled, so customers are not reminded twice.

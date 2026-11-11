@@ -1,5 +1,15 @@
 # CHANGELOG MODULE DUNNING FOR [DOLIBARR ERP CRM](https://www.dolibarr.org)
 
+## 1.5.0
+
+- Aged balance in the list of the customers (not due, 1-30, 31-60, 61-90 and over 90 days late) with a total line.
+- Statement of account: a PDF of the customer with all its invoices to pay and their age, from its Documents tab or attached by a level (setup: PDF attached = formal notice or statement).
+- Direct debits: no reminder while the request waits or the order is not credited, no level before the due date for an invoice or an installment paid by direct debit; after a rejection the reminders go on.
+- With the module Payment schedules (1.1.0 or later, technical name `installments`): an installment is known by its due date, its levels are kept when the schedule is saved again; with the module disabled, all the levels sent count; schedules that can not be read leave the invoices reminded as a whole.
+- Once the penalty invoice is created, the reminders of the invoice no longer ask for the penalties, and a penalty invoice owes none.
+- Public email templates only; the email templates of the module are created once (a template deleted by the user does not come back at the next activation).
+- Checked with phpcs, phpstan and phan of Dolibarr; tests on MySQL and PostgreSQL, Dolibarr 24.0 and develop.
+
 ## 1.4.0
 
 - With the module [Payment schedules](https://github.com/guiltekmdion/dolibarr-echeances) enabled, an invoice with a schedule of expected payments is reminded installment by installment: the oldest unpaid installment and the amount due, the levels kept by installment (a paid installment lets the next one start again from the first level), late penalties counted from the date of each installment, the indemnity still once per invoice.
