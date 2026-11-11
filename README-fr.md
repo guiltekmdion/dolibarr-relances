@@ -14,6 +14,9 @@ Le module envoie les emails de relance des factures clients impayées, niveau ap
 - **Promesse de paiement** : aucune relance jusqu'au jour promis, puis le niveau suivant.
 - **Clients jamais relancés** : un tag/catégorie choisi dans la configuration (module Tags/Catégories).
 - **Page d'accueil** : une ligne « Clients à relancer » dans le bloc Factures, qui ouvre la liste filtrée.
+- **Prêt à l'emploi** : à la première activation, 3 modèles d'email en français et en anglais (courtoisie, relance, mise en demeure) et 3 niveaux (3 jours avant l'échéance, 15 jours après avec un email par client, 30 jours après à la main).
+- **Pénalités de retard et indemnité de recouvrement** (France, entre professionnels) : taux annuel et indemnité forfaitaire dans la configuration, calculés pour chaque facture en retard, affichés dans les emails et dans l'onglet de la facture ; un bouton prépare une facture brouillon séparée.
+- **Clés dans l'éditeur de modèles** : les clés `__DUNNING_*__` apparaissent dans la liste des clés de l'éditeur de modèles, avec leurs valeurs quand une facture est envoyée à la main depuis sa fiche.
 
 ## Règles
 
@@ -25,7 +28,7 @@ Le module envoie les emails de relance des factures clients impayées, niveau ap
 
 ## Prérequis
 
-Dolibarr 24.0 ou plus, avec les modules Factures clients, Travaux planifiés et Agenda. PHP 7.2 ou plus. MySQL/MariaDB ou PostgreSQL.
+Dolibarr 24.0 ou plus, avec les modules Factures clients, Travaux planifiés et Agenda. PHP 8.1 ou plus. MySQL/MariaDB ou PostgreSQL.
 
 ## Installation
 
@@ -33,16 +36,21 @@ Dolibarr 24.0 ou plus, avec les modules Factures clients, Travaux planifiés et 
 2. Dans Dolibarr : Accueil > Configuration > Modules > Déployer/Installer un module externe, puis envoyer le zip. Ou le décompresser dans `htdocs/custom` (le dossier `dunning` doit être en `htdocs/custom/dunning`).
 3. Activer le module **Relances** (dans Modules financiers), puis donner les droits aux utilisateurs.
 
+Après une mise à jour du module, le désactiver puis le réactiver : les nouveaux modèles et réglages sont ajoutés, vos niveaux et vos modèles sont gardés.
+
 ## Configuration
 
-1. Créer les modèles d'email des niveaux (Accueil > Configuration > Emails > Modèles des courriels, type **Factures clients**). Un modèle de même libellé dans une autre langue sert aux clients de cette langue. Clés des modèles :
+1. Vérifier les modèles d'email « Relances - 1, 2, 3 » (Accueil > Configuration > Emails > Modèles des courriels, type **Factures clients**), ou créer les vôtres. Un modèle de même libellé dans une autre langue sert aux clients de cette langue. Clés des modèles :
    - `__DUNNING_LEVEL__` : nom du niveau
    - `__DUNNING_DAYS_LATE__` : jours de retard de la facture la plus ancienne
    - `__DUNNING_INVOICES__` : tableau des factures de l'email, avec les liens de paiement
    - `__DUNNING_TOTAL_REMAIN__` : total restant à payer
+   - `__DUNNING_PENALTIES__`, `__DUNNING_INDEMNITY__`, `__DUNNING_TOTAL_WITH_PENALTIES__` : pénalités de retard, indemnité de recouvrement et total avec elles
+   - `__DUNNING_PENALTIES_TEXT__` : une phrase qui cite les pénalités et l'indemnité dues, vide si rien n'est dû
    - les clés habituelles (`__REF__`, `__ONLINE_PAYMENT_URL__`...) marchent aussi, mais dans un email de plusieurs factures, seules les clés `__DUNNING_*__` les décrivent toutes.
 2. Configuration du module : une ligne par niveau, et le tag des clients jamais relancés.
-3. Pour envoyer automatiquement : activer la tâche « Envoyer les relances des factures clients impayées » dans Accueil > Outils d'administration > Travaux planifiés, et laisser désactivée la tâche de relance de Dolibarr.
+3. Pénalités de retard (facultatif) : le taux annuel (en France, par défaut le taux de la Banque centrale européenne majoré de 10 points : 12,40 % au 2e semestre 2026, au moins 3 fois le taux d'intérêt légal ; il change chaque semestre, voir [service-public.fr](https://entreprendre.service-public.gouv.fr/vosdroits/F23211)), l'indemnité forfaitaire de recouvrement (40 en France, une fois par facture en retard), et un tag des clients qui n'en doivent jamais. Seuls les clients reconnus comme entreprises par Dolibarr (numéro de TVA ou identifiant professionnel) doivent des pénalités. Elles sont affichées, jamais ajoutées à la facture : le bouton de l'onglet prépare une facture brouillon séparée, à vérifier et valider.
+4. Pour envoyer automatiquement : activer la tâche « Envoyer les relances des factures clients impayées » dans Accueil > Outils d'administration > Travaux planifiés, et laisser désactivée la tâche de relance de Dolibarr.
 
 Droits : « Lire les relances » (il faut aussi le droit de lire les factures), « Envoyer les relances, enregistrer les promesses de paiement » (avec les droits avancés, il faut aussi le droit d'envoyer les factures par email). Les niveaux sont réglés par un administrateur.
 

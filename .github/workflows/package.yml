@@ -1,25 +1,95 @@
-# Builds module_dunning-<version>.zip with the script of the ModuleBuilder (build/buildzip.php): the folder dunning/ inside, the
-# format of Home > Setup > Modules > Deploy/install external app/module. A tag vX.Y.Z, equal to the version of the descriptor,
-# publishes the zip in a GitHub release.
+# Tests the module on Dolibarr 24.0.3 (demo database, PHP 8.1 and 8.3), then builds module_dunning-<version>.zip with the script
+# of the ModuleBuilder (build/buildzip.php): the folder dunning/ inside, the format of Home > Setup > Modules > Deploy/install
+# external app/module. A tag vX.Y.Z, equal to the version of the descriptor, publishes the zip in a GitHub release.
 name: Package
 
 on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  zip:
-    runs-on: ubuntu-latest
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        php: ['8.1', '8.3']
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: dolibarr
+        ports: ['3306:3306']
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-retries=30
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: Dolibarr/dolibarr
+          ref: '24.0.3'
+          path: dolibarr
 
-      - name: Check the PHP syntax with PHP 7.2, the oldest version supported
-        run: docker run --rm -v "$PWD:/app" -w /app php:7.2-cli sh -c 'find . -name "*.php" -print0 | xargs -0 -n1 php -l'
+      - uses: actions/checkout@v4
+        with:
+          path: dolibarr/htdocs/custom/dunning
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mysqli, gd, intl, zip, calendar, soap
+          tools: phpunit:8.5
+
+      - name: Check the PHP syntax
+        working-directory: dolibarr/htdocs/custom/dunning
+        run: find . -name "*.php" -print0 | xargs -0 -n1 php -l
+
+      - name: Load the demo database of Dolibarr 24.0.0
+        working-directory: dolibarr
+        run: |
+          # The first line of the dump is a MariaDB sandbox comment that the MySQL client refuses
+          tail -n +2 dev/initdemo/mysqldump_dolibarr_24.0.0.sql | mysql -h127.0.0.1 -uroot -proot dolibarr
+          mkdir -p "$GITHUB_WORKSPACE/documents/admin/temp"
+          cat > htdocs/conf/conf.php <<EOF
+          <?php
+          \$dolibarr_main_url_root='http://127.0.0.1';
+          \$dolibarr_main_document_root='$PWD/htdocs';
+          \$dolibarr_main_url_root_alt='/custom';
+          \$dolibarr_main_document_root_alt='$PWD/htdocs/custom';
+          \$dolibarr_main_data_root='$GITHUB_WORKSPACE/documents';
+          \$dolibarr_main_db_host='127.0.0.1';
+          \$dolibarr_main_db_port='3306';
+          \$dolibarr_main_db_name='dolibarr';
+          \$dolibarr_main_db_prefix='llx_';
+          \$dolibarr_main_db_user='root';
+          \$dolibarr_main_db_pass='root';
+          \$dolibarr_main_db_type='mysqli';
+          \$dolibarr_main_db_character_set='utf8';
+          \$dolibarr_main_db_collation='utf8_unicode_ci';
+          \$dolibarr_main_instance_unique_id='11f3c81e86fc9e3b3fd11d81c9a31bd0';
+          \$dolibarr_main_authentication='dolibarr';
+          \$dolibarr_main_prod='0';
+          EOF
+          # The tests run as user 1: make it an administrator, then enable the modules again so that it gets their rights
+          mysql -h127.0.0.1 -uroot -proot dolibarr -e "UPDATE llx_user SET admin = 1 WHERE rowid = 1"
+          (cd htdocs/install && php upgrade2.php 0.0.0 0.0.0 MAIN_MODULE_SOCIETE,MAIN_MODULE_FACTURE,MAIN_MODULE_CATEGORIE,MAIN_MODULE_AGENDA,MAIN_MODULE_CRON > /dev/null)
+
+      - name: Run the tests of the module
+        working-directory: dolibarr
+        run: phpunit -d memory_limit=-1 -c test/phpunit/phpunittest.xml htdocs/custom/dunning/test/phpunit/DunningTest.php
+
+  zip:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Build the zip
         run: |

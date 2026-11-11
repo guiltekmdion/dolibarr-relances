@@ -15,6 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+declare(strict_types=1);
+
 /**
  * \file    dunning/admin/setup.php
  * \ingroup dunning
@@ -79,6 +81,17 @@ $hookmanager->initHooks(array('dunningsetup', 'globalsetup'));
 $formSetup = new FormSetup($db);
 if (isModEnabled('category')) {
 	$formSetup->newItem('DUNNING_EXCLUDED_CATEGORY')->setAsCategory('customer')->nameText = $langs->trans('DunningExcludedCategory');
+}
+// Late penalties and recovery indemnity between companies (article L441-10 of the French commercial code): shown in the reminders
+$item = $formSetup->newItem('DUNNING_PENALTY_RATE');
+$item->nameText = $langs->trans('DunningPenaltyRate');
+$item->helpText = $langs->trans('DunningPenaltyRateHelp');
+$item->cssClass = 'width75';
+$item = $formSetup->newItem('DUNNING_FIXED_INDEMNITY')->setAsPrice();
+$item->nameText = $langs->trans('DunningFixedIndemnity');
+$item->helpText = $langs->trans('DunningFixedIndemnityHelp');
+if (isModEnabled('category')) {
+	$formSetup->newItem('DUNNING_NOPENALTY_CATEGORY')->setAsCategory('customer')->nameText = $langs->trans('DunningNoPenaltyCategory');
 }
 
 $dunning = new Dunning($db);

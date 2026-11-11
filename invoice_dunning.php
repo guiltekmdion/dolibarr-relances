@@ -15,6 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+declare(strict_types=1);
+
 /**
  * \file    dunning/invoice_dunning.php
  * \ingroup dunning
@@ -117,6 +119,16 @@ if (empty($reshook) && $action == 'confirm_promise' && $confirm == 'yes' && $per
 	header('Location: '.$_SERVER['PHP_SELF'].'?id='.$object->id);
 	exit;
 }
+if (empty($reshook) && $action == 'confirm_penaltyinvoice' && $confirm == 'yes' && $permissiontowrite && $user->hasRight('facture', 'creer') && $row) {
+	$penaltyid = $dunning->createPenaltyInvoice($user, $row);
+	if ($penaltyid < 0) {
+		setEventMessages($dunning->error, null, 'errors');
+		header('Location: '.$_SERVER['PHP_SELF'].'?id='.$object->id);
+	} else {
+		header('Location: '.DOL_URL_ROOT.'/compta/facture/card.php?facid='.$penaltyid);
+	}
+	exit;
+}
 
 
 /*
@@ -149,6 +161,11 @@ if ($action == 'promise' && $row) {
 	);
 	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('DunningPromise'), '', 'confirm_promise', $formquestion, 0, 1);
 }
+$amounts = ($row ? $dunning->getPenalties($row, dol_now()) : array('days' => 0, 'penalties' => 0.0, 'indemnity' => 0.0));
+if ($action == 'penaltyinvoice' && $row) {
+	$question = $langs->transnoentitiesnoconv('DunningConfirmPenaltyInvoice', price($amounts['penalties'] + $amounts['indemnity'], 0, $langs, 1, -1, -1, $conf->currency));
+	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('DunningCreatePenaltyInvoice'), $question, 'confirm_penaltyinvoice', '', 0, 1);
+}
 
 print '<div class="fichecenter"><table class="border tableforfield centpercent">';
 if (!$row) {
@@ -164,6 +181,17 @@ if (!$row) {
 	print '</td></tr>';
 	print '<tr><td>'.$langs->trans('DunningPromise').'</td><td>'.($row->promise ? dol_print_date($row->promise, 'day') : '').'</td></tr>';
 	print '<tr><td>'.$langs->trans('MailTo').'</td><td>'.($to ? dolPrintLabel($to) : '<span class="opacitymedium">'.dolPrintLabel($langs->transnoentitiesnoconv('NoRecipientEmail', $object->thirdparty->name)).'</span>').'</td></tr>';
+	if ($amounts['penalties'] + $amounts['indemnity'] > 0 || $row->penaltyinvoice) {
+		print '<tr><td>'.$langs->trans('DunningPenalties').'</td><td>'.price($amounts['penalties'], 0, $langs, 1, -1, -1, $conf->currency);
+		print ' <span class="opacitymedium">('.$langs->trans('DunningPenaltiesDays', $amounts['days']).')</span> + '.$langs->trans('DunningIndemnity').' '.price($amounts['indemnity'], 0, $langs, 1, -1, -1, $conf->currency);
+		if ($row->penaltyinvoice) {
+			$penaltyinvoice = new Facture($db);
+			if ($penaltyinvoice->fetch($row->penaltyinvoice) > 0) {
+				print ' &nbsp; '.$penaltyinvoice->getNomUrl(1);
+			}
+		}
+		print '</td></tr>';
+	}
 }
 print '</table></div>';
 
@@ -174,6 +202,9 @@ if ($row && $row->next) {
 }
 if ($row) {
 	print dolGetButtonAction('', $langs->trans('DunningPromise'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=promise&token='.newToken(), '', $permissiontowrite);
+}
+if ($row && !$row->penaltyinvoice && $amounts['penalties'] + $amounts['indemnity'] > 0) {
+	print dolGetButtonAction('', $langs->trans('DunningCreatePenaltyInvoice'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=penaltyinvoice&token='.newToken(), '', $permissiontowrite && $user->hasRight('facture', 'creer'));
 }
 if ($object->dispute_status != 1) {
 	print dolGetButtonAction('', $langs->trans('DunningDoNotRemind'), 'default', DOL_URL_ROOT.'/compta/facture/card.php?facid='.$object->id.'&action=editdispute_status&token='.newToken(), '', $user->hasRight('facture', 'creer'));

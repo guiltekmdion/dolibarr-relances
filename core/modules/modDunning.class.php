@@ -18,6 +18,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+declare(strict_types=1);
+
 /**
  * 	\defgroup   dunning     Module Dunning
  *  \brief      Dunning module descriptor.
@@ -80,7 +82,7 @@ class modDunning extends DolibarrModules
 		$this->editor_squarred_logo = '';					// Must be image filename into the module/img directory followed with @modulename. Example: 'myimage.png@dunning'
 
 		// Possible values for version are: 'development', 'experimental', 'dolibarr', 'dolibarr_deprecated', 'experimental_deprecated' or a version string like 'x.y.z'
-		$this->version = '1.0.0';
+		$this->version = '1.1.0';
 		// Url to the file with your last numberversion of this module
 		//$this->url_last_version = 'http://www.example.com/versionmodule.txt';
 
@@ -112,7 +114,7 @@ class modDunning extends DolibarrModules
 			// Set this to 1 if module has its own login method file (core/login)
 			'login' => 0,
 			// Set this to 1 if module has its own substitution function file (core/substitutions)
-			'substitutions' => 0,
+			'substitutions' => 1,	// Keys __DUNNING_*__ in the editor of the email templates and the email form of an invoice
 			// Set this to 1 if module has its own menus handler directory (core/menus)
 			'menus' => 0,
 			// Set this to 1 if module overwrite template dir (core/tpl)
@@ -168,7 +170,7 @@ class modDunning extends DolibarrModules
 		$this->langfiles = array("dunning@dunning");
 
 		// Prerequisites
-		$this->phpmin = array(7, 2); // Minimum version of PHP required by module
+		$this->phpmin = array(8, 1); // Minimum version of PHP required by module
 		// $this->phpmax = array(8, 0); // Maximum version of PHP required by module
 		$this->need_dolibarr_version = array(24, 0); // Minimum version of Dolibarr required by module
 		// $this->max_dolibarr_version = array(19, -3); // Maximum version of Dolibarr required by module
@@ -495,7 +497,7 @@ class modDunning extends DolibarrModules
 	 */
 	public function init($options = '')
 	{
-		global $conf, $langs;
+		global $conf, $langs, $user;
 
 		// Create tables of module at module activation
 		//$result = $this->_load_tables('/install/mysql/', 'dunning');
@@ -513,6 +515,14 @@ class modDunning extends DolibarrModules
 		//$result3=$extrafields->addExtraField('dunning_myattr3', "New Attr 3 label", 'varchar', 1, 10, 'bank_account', 0, 0, '', '', 1, '', -1, 0, '', '', 'dunning@dunning', 'isModEnabled("dunning")');
 		//$result4=$extrafields->addExtraField('dunning_myattr4', "New Attr 4 label", 'select',  1,  3, 'thirdparty',   0, 1, '', array('options'=>array('code1'=>'Val1','code2'=>'Val2','code3'=>'Val3')), 1,'', -1, 0, '', '', 'dunning@dunning', 'isModEnabled("dunning")');
 		//$result5=$extrafields->addExtraField('dunning_myattr5', "New Attr 5 label", 'text',    1, 10, 'user',         0, 0, '', '', 1, '', -1, 0, '', '', 'dunning@dunning', 'isModEnabled("dunning")');
+
+		// The email templates that are not there yet, then the default levels on the first activation
+		dol_include_once('/dunning/class/dunning.class.php');
+		$dunning = new Dunning($this->db);
+		if ($dunning->initTemplates() < 0 || ($user instanceof User && $dunning->initDefaultLevels($user) < 0)) {	// No user when enabled from the command line
+			$this->error = $dunning->error;
+			return -1;
+		}
 
 		// Permissions
 		$this->remove($options);

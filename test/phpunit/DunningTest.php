@@ -1,0 +1,1322 @@
+<?php
+/* Copyright (C) 2026		Maxime DION				<m.dion@guiltek.fr>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+/**
+ * \file    dunning/test/phpunit/DunningTest.php
+ * \ingroup dunning
+ * \brief   PHPUnit test for the module Reminders (dunning)
+ */
+
+global $conf, $user, $langs, $db;
+// The module is in htdocs/custom/dunning: the tests of Dolibarr are 5 levels up
+require_once dirname(__FILE__).'/../../../../../test/phpunit/CommonClassTest.class.php';
+require_once dirname(__FILE__).'/../../core/modules/modDunning.class.php';
+require_once dirname(__FILE__).'/../../class/dunning.class.php';
+require_once dirname(__FILE__).'/../../class/actions_dunning.class.php';
+require_once dirname(__FILE__).'/../../core/substitutions/functions_dunning.lib.php';
+require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
+
+if (empty($user->id)) {
+	print "Load permissions for admin user nb 1\n";
+	$user->fetch(1);
+	$user->loadRights();
+}
+
+$conf->global->MAIN_DISABLE_ALL_MAILS = 1;
+
+
+/**
+ * Class DunningTest
+ *
+ * @backupGlobals disabled
+ * @backupStaticAttributes enabled
+ * @remarks	backupGlobals must be disabled to have db,conf,user and lang not erased.
+ */
+class DunningTest extends CommonClassTest
+{
+	/**
+	 * @var bool True if this class enabled the module
+	 */
+	private static $activated = false;
+
+	/**
+	 * @var ?HookManager Hook manager replaced by captureMails()
+	 */
+	private $savhookmanager = null;
+
+	/**
+	 * @var string Sender replaced by captureMails()
+	 */
+	private $savmailfrom = '';
+
+	/**
+	 * @var int Number of email templates created by createLevels(), for a label of its own each
+	 */
+	private $nbtemplates = 0;
+
+	/**
+	 * Enable the module (creation of its table, so outside the transaction of the tests) and load its rights
+	 *
+	 * @return void
+	 */
+	public static function setUpBeforeClass(): void
+	{
+		global $db, $conf, $user;
+
+		if (!isModEnabled('dunning')) {
+			require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
+			$result = activateModule('modDunning');
+			self::assertEmpty($result['errors'], 'Failed to activate module dunning: '.implode(', ', $result['errors']));
+			$conf->setValues($db);
+			$conf->global->MAIN_DISABLE_ALL_MAILS = 1;	// Reset by setValues()
+			self::$activated = true;
+			// The default levels of the activation would mix with the levels of the tests: testDunningDefaultLevels() creates them again
+			self::assertTrue((bool) $db->query("DELETE FROM ".$db->prefix()."dunning_level WHERE entity = ".((int) $conf->entity)));
+		}
+		$user->loadRights('', 1);
+		self::assertTrue(isModEnabled('dunning'), 'module dunning must be enabled');
+
+		parent::setUpBeforeClass();
+	}
+
+	/**
+	 * Disable the module if this class enabled it
+	 *
+	 * @return void
+	 */
+	public static function tearDownAfterClass(): void
+	{
+		global $db, $conf;
+
+		parent::tearDownAfterClass();
+		if (self::$activated) {
+			unActivateModule('modDunning');
+			$conf->setValues($db);
+			$conf->global->MAIN_DISABLE_ALL_MAILS = 1;
+		}
+	}
+
+	/**
+	 * Restore what a test changed in memory and delete what it created, even if it failed: the next test starts from a clean state
+	 *
+	 * @return void
+	 */
+	protected function tearDown(): void
+	{
+		global $conf, $hookmanager;
+
+		$db = $this->savdb;
+		if ($this->savhookmanager) {
+			$hookmanager = $this->savhookmanager;
+			$conf->global->MAIN_MAIL_EMAIL_FROM = $this->savmailfrom;
+		}
+		$conf->global->MAIN_DISABLE_ALL_MAILS = 1;
+		unset($conf->global->DUNNING_START_DATE, $conf->global->DUNNING_EXCLUDED_CATEGORY);
+		unset($conf->global->DUNNING_PENALTY_RATE, $conf->global->DUNNING_FIXED_INDEMNITY, $conf->global->DUNNING_NOPENALTY_CATEGORY);
+
+		$socs = "SELECT rowid FROM ".$db->prefix()."societe WHERE nom LIKE 'DUNNINGTEST%'";
+		$invoices = "SELECT rowid FROM ".$db->prefix()."facture WHERE fk_soc IN (".$socs.")";
+		$sqls = array(
+			"DELETE FROM ".$db->prefix()."actioncomm_resources WHERE fk_actioncomm IN (SELECT id FROM ".$db->prefix()."actioncomm WHERE fk_soc IN (".$socs."))",
+			"DELETE FROM ".$db->prefix()."actioncomm WHERE fk_soc IN (".$socs.")",
+			"DELETE FROM ".$db->prefix()."paiement_facture WHERE fk_facture IN (".$invoices.")",
+			"DELETE FROM ".$db->prefix()."paiement WHERE ref = 'DUNNINGTEST'",
+			"DELETE FROM ".$db->prefix()."element_contact WHERE fk_socpeople IN (SELECT rowid FROM ".$db->prefix()."socpeople WHERE fk_soc IN (".$socs."))",
+			"DELETE FROM ".$db->prefix()."societe_remise_except WHERE fk_soc IN (".$socs.")",
+			"DELETE FROM ".$db->prefix()."element_element WHERE (sourcetype = 'facture' AND fk_source IN (".$invoices.")) OR (targettype = 'facture' AND fk_target IN (".$invoices."))",
+			"DELETE FROM ".$db->prefix()."facturedet WHERE fk_facture IN (".$invoices.")",
+			"DELETE FROM ".$db->prefix()."facture WHERE fk_soc IN (".$socs.")",
+			"DELETE FROM ".$db->prefix()."societe_contacts WHERE fk_soc IN (".$socs.")",
+			"DELETE FROM ".$db->prefix()."societe_commerciaux WHERE fk_soc IN (".$socs.")",
+			"DELETE FROM ".$db->prefix()."categorie_societe WHERE fk_soc IN (".$socs.")",
+			"DELETE FROM ".$db->prefix()."socpeople WHERE fk_soc IN (".$socs.")",
+			"DELETE FROM ".$db->prefix()."societe WHERE nom LIKE 'DUNNINGTEST%'",
+			"DELETE FROM ".$db->prefix()."categorie WHERE label LIKE 'DUNNINGTEST%'",
+			"DELETE FROM ".$db->prefix()."dunning_level WHERE label LIKE 'DUNNINGTEST%'".(self::$activated ? " OR entity = ".((int) $conf->entity) : ''),	// Default levels too
+			"DELETE FROM ".$db->prefix()."c_email_templates WHERE label LIKE 'DUNNINGTEST%'",
+			"DELETE FROM ".$db->prefix()."cronjob WHERE label LIKE 'DUNNINGTEST%'",
+			"DELETE FROM ".$db->prefix()."const WHERE name = 'DUNNING_START_DATE'",
+		);
+		foreach ($sqls as $sql) {
+			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+		}
+
+		parent::tearDown();
+	}
+
+	/**
+	 * Version and editor, its table created when enabled; the status of the scheduled job is the only switch: job disabled at activation, and the date of its first run deleted with the module
+	 *
+	 * @return void
+	 */
+	public function testDunningDescriptor()
+	{
+		global $db;
+		$db = $this->savdb;
+
+		$module = new modDunning($db);
+
+		$this->assertSame(array('1.1.0', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
+		$this->assertTrue((bool) $db->query("SELECT rowid FROM ".$db->prefix()."dunning_level"), 'Enabling the module creates its table: '.$db->lasterror());
+		$this->assertSame(0, $module->cronjobs[0]['status']);
+		$this->assertSame(array('DUNNING_START_DATE', 1), array($module->const[0][0], $module->const[0][6]), 'A module enabled again does not send the past');
+	}
+
+	/**
+	 * Next level of an invoice: catch-up, gap between levels, promise, start date, disabled level, level before the due date
+	 *
+	 * @return void
+	 */
+	public function testDunningComputeState()
+	{
+		global $db;
+		$db = $this->savdb;
+
+		$dunning = new Dunning($db);
+		$levels = array();
+		foreach (array(1 => -5, 2 => 10, 3 => 20, 4 => 30) as $rowid => $nbdays) {
+			$levels[$rowid] = (object) array('rowid' => $rowid, 'nbdays' => $nbdays, 'active' => ($rowid == 3 ? 0 : 1));
+		}
+		$ref = dol_mktime(0, 0, 0, 6, 10, 2026, 'tzserver');	// Due date, no change of hour from May to July
+		$day = 86400;
+		// Levels sent, promise, start date, today => last level, next level, date of the next level, automatic
+		$cases = array(
+			'not due yet, unknown level ignored' => array(array(99 => $ref), 0, 0, $ref - 7 * $day, array(0, 1, $ref - 5 * $day, true)),
+			'due today: no level before the due date' => array(array(), 0, 0, $ref, array(0, 2, $ref + 10 * $day, true)),
+			'level sent on time' => array(array(1 => $ref - 5 * $day), 0, 0, $ref, array(1, 2, $ref + 10 * $day, true)),
+			'gap after a level sent late' => array(array(1 => $ref + 3 * $day), 0, 0, $ref + 3 * $day, array(1, 2, $ref + 18 * $day, true)),
+			'never back, disabled level skipped' => array(array(2 => $ref + 10 * $day, 1 => $ref - 5 * $day), 0, 0, $ref + 10 * $day, array(2, 4, $ref + 30 * $day, true)),
+			'disabled level sent keeps its rank' => array(array(3 => $ref + 25 * $day), 0, 0, $ref + 25 * $day, array(3, 4, $ref + 35 * $day, true)),
+			'last level sent' => array(array(4 => $ref + 30 * $day), 0, 0, $ref + 30 * $day, array(4, 0, 0, false)),
+			'nothing up to the promised day' => array(array(2 => $ref + 10 * $day), $ref + 40 * $day, 0, $ref + 10 * $day, array(2, 4, $ref + 41 * $day, true)),
+			'level reached before the start date' => array(array(), 0, $ref + 12 * $day, $ref + 15 * $day, array(0, 2, $ref + 10 * $day, false)),
+			'level reached on the start date' => array(array(), 0, $ref + 10 * $day, $ref + 15 * $day, array(0, 2, $ref + 10 * $day, true)),
+			'start date against the level, not the gap' => array(array(1 => $ref + 3 * $day), 0, $ref + 15 * $day, $ref + 3 * $day, array(1, 2, $ref + 18 * $day, false)),
+		);
+		foreach ($cases as $label => $case) {
+			$state = $dunning->computeState($levels, $ref, $case[0], $case[1], $case[2], $case[3]);
+			$this->assertSame($case[4], array($state->last ? $state->last->rowid : 0, $state->next ? $state->next->rowid : 0, $state->nextdate, $state->auto), $label);
+		}
+
+		// A level by hand is never for the job, the levels after it wait for it
+		$levels[2]->byhand = 1;
+		$state = $dunning->computeState($levels, $ref, array(1 => $ref - 5 * $day), 0, 0, $ref + 40 * $day);
+		$this->assertSame(array(2, false), array($state->next->rowid, $state->auto), 'level by hand');
+	}
+
+	/**
+	 * Rule 1: validated unpaid invoices, not credit notes, due when the date of their next level is today or before (a missed day is caught up)
+	 *
+	 * @return void
+	 */
+	public function testDunningSelection()
+	{
+		$levels = $this->createLevels(array(0, 10));
+		$socid = $this->createCustomer('selection@example.com');
+		// Days from today to the due date, more SQL => next level and due, false if out of the circuit
+		$cases = array(
+			'due today' => array(0, '', array($levels[0], true)),
+			'missed day caught up' => array(-3, '', array($levels[0], true)),
+			'second level reached, first level first' => array(-12, '', array($levels[0], true)),
+			'not due yet' => array(2, '', false),
+			'draft' => array(-3, 'fk_statut = 0', false),
+			'abandoned' => array(-3, 'fk_statut = 3', false),
+			'classified paid' => array(-3, 'paye = 1', false),
+			'credit note' => array(-3, 'type = 2', false),
+			'deposit' => array(-3, 'type = 3', array($levels[0], true)),
+			'replacement' => array(-3, 'type = 1', array($levels[0], true)),
+		);
+		$ids = array();
+		foreach ($cases as $key => $case) {
+			$ids[$key] = $this->createInvoice($socid, $case[0], $case[1]);
+		}
+
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		foreach ($cases as $key => $case) {
+			$row = $rows[$ids[$key]] ?? null;
+			$this->assertSame($case[2], $row ? array($row->next->rowid, $row->due) : false, $key);
+		}
+
+		// The tab of an invoice reads it before its first level
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array(), 0, $ids['not due yet']);
+		$this->assertSame(array($ids['not due yet']), array_keys($rows));
+		$this->assertFalse($rows[$ids['not due yet']]->due);
+	}
+
+	/**
+	 * Rule 2: levels in the order of their days, the next level waits for the gap after the previous one
+	 *
+	 * @return void
+	 */
+	public function testDunningLevelGap()
+	{
+		$levels = $this->createLevels(array(20, 5));
+		$dunning = new Dunning($this->savdb);
+		$this->assertSame(array(5, 20), array_column($dunning->fetchLevels(), 'nbdays'));
+
+		// Both levels reached, the first one sent 2 days ago: the second one waits 15 days after it (one date for the whole test, even at midnight)
+		$now = dol_now();
+		$socid = $this->createCustomer('gap@example.com');
+		$id = $this->createInvoice($socid, -30, '', $now);
+		$this->addSentEvent($id, $socid, $levels[5], dol_time_plus_duree(dol_get_first_hour($now), -2, 'd', 0, 'tzserver'));
+		foreach (array(0 => false, 12 => false, 13 => true) as $days => $due) {
+			$rows = $dunning->getInvoices($this->savuser, dol_time_plus_duree($now, $days, 'd', 0, 'tzserver'), array($socid));
+			$this->assertSame(array($levels[5], $levels[20], $due), array($rows[$id]->last->rowid, $rows[$id]->next->rowid, $rows[$id]->due), 'In '.$days.' days');
+		}
+	}
+
+	/**
+	 * Rule 3: the job sent twice the same day sends one level once
+	 *
+	 * @return void
+	 */
+	public function testDunningSendTwice()
+	{
+		global $conf;
+
+		$hook = $this->captureMails();
+		$levels = $this->createLevels(array(0, 10));
+		$socid = $this->createCustomer('twice@example.com');
+		$id = $this->createInvoice($socid, -40);
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree(dol_now(), -41, 'd', 0, 'tzserver');
+
+		$dunning = new Dunning($this->savdb);
+		$this->assertSame(0, $dunning->sendReminders(), $dunning->error.implode(', ', $dunning->errors));
+		$this->assertSame(0, $dunning->sendReminders(), $dunning->error.implode(', ', $dunning->errors));
+		$this->assertSame(array('twice@example.com|(PROV'.$id.')'), $hook->mails, 'The first level once, never two levels the same day');
+		$this->assertSame(array(Dunning::CODE_PREFIX.$levels[0].Dunning::CODE_SENT_SUFFIX), array_column($dunning->getEvents(array($id)), 'code'));
+	}
+
+	/**
+	 * Rule 3: a level sent by another run or user after the invoices were read is not sent again
+	 *
+	 * @return void
+	 */
+	public function testDunningSentMeanwhile()
+	{
+		$hook = $this->captureMails();
+		$levels = $this->createLevels(array(0));
+		$socid = $this->createCustomer('meanwhile@example.com');
+		$sent = $this->createInvoice($socid, -1);
+		$other = $this->createInvoice($socid, -1);
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->addSentEvent($sent, $socid, $levels[0], dol_now());
+
+		$this->assertSame(0, $dunning->send($this->savuser, $rows), implode(', ', $dunning->errors));
+		$this->assertSame(array('meanwhile@example.com|(PROV'.$other.')'), $hook->mails);
+		$this->assertCount(1, $dunning->getEvents(array($sent)), 'Not recorded twice');
+	}
+
+	/**
+	 * Rule 4: no reminder up to the promised day, then the next level
+	 *
+	 * @return void
+	 */
+	public function testDunningPromise()
+	{
+		$levels = $this->createLevels(array(0, 10));
+		$socid = $this->createCustomer('promise@example.com');
+		$id = $this->createInvoice($socid, -15);
+		$today = dol_get_first_hour(dol_now());
+		$this->addSentEvent($id, $socid, $levels[0], dol_time_plus_duree($today, -15, 'd', 0, 'tzserver'));
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertTrue($rows[$id]->due);
+
+		$this->assertSame(-1, $dunning->addPromise($this->savuser, $rows, dol_time_plus_duree($today, -1, 'd', 0, 'tzserver'), ''), 'Promised day over');
+		$promise = dol_time_plus_duree($today, 3, 'd', 0, 'tzserver');
+		$this->assertSame(1, $dunning->addPromise($this->savuser, $rows, $promise, 'Pays on Monday'), $dunning->error);
+		foreach (array(0 => false, 3 => false, 4 => true) as $days => $due) {
+			$rows = $dunning->getInvoices($this->savuser, dol_time_plus_duree(dol_now(), $days, 'd', 0, 'tzserver'), array($socid));
+			$this->assertSame(array($promise, $levels[10], $due), array($rows[$id]->promise, $rows[$id]->next->rowid, $rows[$id]->due), 'In '.$days.' days');
+		}
+
+		// A promise for today is accepted: no reminder today
+		$id = $this->createInvoice($socid, -15);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertTrue($rows[$id]->due);
+		$this->assertSame(1, $dunning->addPromise($this->savuser, array($rows[$id]), $today, ''), $dunning->error);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertFalse($rows[$id]->due);
+
+		// The list keeps a customer whose only invoice due is promised, with the date of the promise
+		$promised = $this->createCustomer('promised@example.com');
+		$this->createInvoice($promised, -2);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($promised));
+		$this->assertSame(1, $dunning->addPromise($this->savuser, $rows, $promise, ''), $dunning->error);
+		$customers = $dunning->getCustomers($this->savuser, dol_now());
+		$this->assertSame(array($promise, false), array($customers[$promised]['promise'] ?? 0, $customers[$promised]['due'] ?? null), 'Promised: in the list, nothing due');
+	}
+
+	/**
+	 * Rule 5: no reminder once paid, during a dispute, or for a customer of the excluded category. Only the rest to pay is reminded.
+	 *
+	 * @return void
+	 */
+	public function testDunningStop()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$user = $this->savuser;
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('stop@example.com');
+		$excluded = $this->createCustomer('excluded@example.com');
+		// Customer, more SQL, amount paid on 120 => still reminded
+		$cases = array(
+			'unpaid' => array($socid, '', 0, true),
+			'partially paid' => array($socid, '', 50, true),
+			'paid, not closed' => array($socid, '', 120, false),
+			'dispute open' => array($socid, 'dispute_status = 1', 0, false),
+			'dispute closed' => array($socid, 'dispute_status = 9', 0, true),
+			'customer excluded' => array($excluded, '', 0, false),
+		);
+		$ids = array();
+		foreach ($cases as $key => $case) {
+			$ids[$key] = $this->createInvoice($case[0], -5, $case[1]);
+			if ($case[2]) {
+				$this->addPayment($ids[$key], $case[2]);
+			}
+		}
+
+		$dunning = new Dunning($db);
+		$this->assertSame(0, $dunning->excludeThirdparties($user, array($excluded)), 'No category in the setup');
+		$category = new Categorie($db);
+		$category->label = 'DUNNINGTEST excluded';
+		$category->type = Categorie::TYPE_CUSTOMER;
+		$this->assertGreaterThan(0, $category->create($user), (string) $category->error);
+		$conf->global->DUNNING_EXCLUDED_CATEGORY = $category->id;
+		$this->assertSame(1, $dunning->excludeThirdparties($user, array($excluded, $excluded)), $dunning->error);
+		$this->assertSame(1, $dunning->excludeThirdparties($user, array($excluded)), 'Already excluded: '.$dunning->error);
+		$this->assertSame(0, $dunning->excludeThirdparties($user, array()), 'Nobody: '.$dunning->error);
+
+		$rows = $dunning->getInvoices($user, dol_now(), array($socid, $excluded));
+		foreach ($cases as $key => $case) {
+			$this->assertSame($case[3], isset($rows[$ids[$key]]), $key);
+		}
+		$row = $rows[$ids['partially paid']];
+		$this->assertSame(70.0, $row->remain);
+		$subst = $dunning->getSubstitutions(array($row), $row->next, $langs, dol_now());
+		foreach (array(120, 50, 70) as $amount) {	// Amount, already paid, rest to pay
+			$this->assertStringContainsString('<td style="text-align: right">'.price($amount, 0, $langs, 1, -1, -1, $conf->currency).'</td>', $subst['__DUNNING_INVOICES__']);
+		}
+		$this->assertSame($subst['__AMOUNT_REMAIN_FORMATTED__'], $subst['__AMOUNT_REMAIN_FORMATED__'], 'The old spelling of the core too');
+	}
+
+	/**
+	 * Rule 5: the rest to pay deducts the credit notes and deposits used, and a retained warranty is due at its own date
+	 *
+	 * @return void
+	 */
+	public function testDunningAmountDue()
+	{
+		$db = $this->savdb;
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('amounts@example.com');
+		$sources = array(
+			'credit note' => $this->createInvoice($socid, -5, 'type = '.Facture::TYPE_CREDIT_NOTE),
+			'deposit' => $this->createInvoice($socid, -5, 'type = '.Facture::TYPE_DEPOSIT.', paye = 1'),
+		);
+		$today = dol_get_first_hour(dol_now());
+		$duedate = dol_time_plus_duree($today, -5, 'd', 0, 'tzserver');
+		$inayear = dol_time_plus_duree($today, 365, 'd', 0, 'tzserver');
+		$twodaysago = dol_time_plus_duree($today, -2, 'd', 0, 'tzserver');
+		// Invoices of 120 due 5 days ago: more SQL, amount paid, amount used from a credit note or deposit => rest to pay, reference date, due
+		$cases = array(
+			'credit note used' => array('', 0, array('credit note' => 20), array(100.0, $duedate, true)),
+			'deposit used' => array('', 0, array('deposit' => 30), array(90.0, $duedate, true)),
+			'warranty not due, all unpaid' => array("retained_warranty = 5, retained_warranty_date_limit = '".$db->idate($inayear)."'", 0, array(), array(114.0, $duedate, true)),
+			'warranty not due, the rest paid' => array("retained_warranty = 5, retained_warranty_date_limit = '".$db->idate($inayear)."'", 114, array(), array(6.0, $inayear, false)),
+			'warranty due, the rest paid' => array("retained_warranty = 5, retained_warranty_date_limit = '".$db->idate($twodaysago)."'", 114, array(), array(6.0, $twodaysago, true)),
+			'warranty due, all unpaid' => array("retained_warranty = 5, retained_warranty_date_limit = '".$db->idate($twodaysago)."'", 0, array(), array(120.0, $duedate, true)),
+		);
+		$ids = array();
+		foreach ($cases as $key => $case) {
+			$ids[$key] = $this->createInvoice($socid, -5, $case[0]);
+			if ($case[1]) {
+				$this->addPayment($ids[$key], $case[1]);
+			}
+			foreach ($case[2] as $source => $amount) {
+				$sql = "INSERT INTO ".$db->prefix()."societe_remise_except (entity, fk_soc, discount_type, datec, amount_ht, amount_tva, amount_ttc, tva_tx, fk_user, fk_facture, fk_facture_source, description)";
+				$sql .= " VALUES (1, ".((int) $socid).", 0, '".$db->idate(dol_now())."', ".((float) $amount).", 0, ".((float) $amount).", 0, ".((int) $this->savuser->id).", ".((int) $ids[$key]).", ".((int) $sources[$source]).", 'DUNNINGTEST')";
+				$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+			}
+		}
+
+		$dunning = new Dunning($db);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame(array_values($ids), array_keys($rows), 'Only the invoices to remind, not the credit note nor the deposit used');
+		foreach ($cases as $key => $case) {
+			$this->assertSame($case[3], array($rows[$ids[$key]]->remain, $rows[$ids[$key]]->refdate, $rows[$ids[$key]]->due), $key);
+		}
+	}
+
+	/**
+	 * Rule 6: contact of the invoice of the type of the level, else default contact of the customer, else email of the customer
+	 *
+	 * @return void
+	 */
+	public function testDunningRecipients()
+	{
+		$db = $this->savdb;
+		$user = $this->savuser;
+		$resql = $db->query("SELECT rowid FROM ".$db->prefix()."c_type_contact WHERE element = 'facture' AND source = 'external' AND code = 'BILLING'");
+		$billing = (int) $db->fetch_object($resql)->rowid;
+		$this->createLevels(array(0), array('fk_c_type_contact' => $billing));
+		$soca = $this->createCustomer('a@example.com');
+		$socb = $this->createCustomer('b@example.com');
+		$socc = $this->createCustomer('');
+		$ids = array(
+			'contact of the invoice' => $this->createInvoice($soca, -2),
+			'default contact of the customer' => $this->createInvoice($soca, -2),
+			'inactive contact' => $this->createInvoice($socb, -2),
+			'email of the customer' => $this->createInvoice($socb, -2),
+			'no email' => $this->createInvoice($socc, -2),
+		);
+		// After the invoices: a default contact of the customer is copied on the invoices created after it
+		$contacts = array();
+		foreach (array('invoice@example.com' => $soca, 'default@example.com' => $soca, 'inactive@example.com' => $socb) as $email => $socid) {
+			$contact = new Contact($db);
+			$contact->socid = $socid;
+			$contact->lastname = 'DUNNINGTEST';
+			$contact->email = $email;
+			$contact->statut = 1;
+			$this->assertGreaterThan(0, $contact->create($user), (string) $contact->error);
+			$contacts[$email] = $contact->id;
+		}
+		foreach (array('contact of the invoice' => 'invoice@example.com', 'inactive contact' => 'inactive@example.com') as $key => $email) {
+			$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."element_contact (statut, element_id, fk_c_type_contact, fk_socpeople) VALUES (4, ".((int) $ids[$key]).", ".((int) $billing).", ".((int) $contacts[$email]).")"), (string) $db->lasterror());
+		}
+		$this->assertTrue((bool) $db->query("UPDATE ".$db->prefix()."socpeople SET statut = 0 WHERE rowid = ".((int) $contacts['inactive@example.com'])), (string) $db->lasterror());
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."societe_contacts (entity, date_creation, fk_soc, fk_c_type_contact, fk_socpeople) VALUES (1, '".$db->idate(dol_now())."', ".((int) $soca).", ".((int) $billing).", ".((int) $contacts['default@example.com']).")"), (string) $db->lasterror());
+
+		$dunning = new Dunning($db);
+		$rows = $dunning->getInvoices($user, dol_now(), array($soca, $socb, $socc));
+		$recipients = $dunning->getRecipients($rows);
+		$expected = array(
+			'contact of the invoice' => array('invoice@example.com'),
+			'default contact of the customer' => array('default@example.com'),
+			'inactive contact' => array('b@example.com'),
+			'email of the customer' => array('b@example.com'),
+			'no email' => array(),
+		);
+		foreach ($expected as $key => $emails) {
+			$this->assertSame($emails, $recipients[$ids[$key]], $key);
+		}
+
+		// No email at all, or emails disabled: an error each and no event, as an email is sent before its event is recorded
+		$opened = $db->transaction_opened;
+		$this->assertSame(2, $dunning->send($user, array($rows[$ids['no email']], $rows[$ids['email of the customer']])));
+		$this->assertSame(array(), $dunning->getEvents(array($ids['no email'], $ids['email of the customer'])));
+		$this->assertSame($opened, $db->transaction_opened);
+
+		// One email for the invoices of a customer: the recipients of each invoice, from a list keyed from 0 as the tab of the invoice sends
+		$hook = $this->captureMails();
+		$this->assertSame(0, $dunning->send($user, array($rows[$ids['contact of the invoice']], $rows[$ids['default contact of the customer']]), 1));
+		$this->assertSame(array('invoice@example.com,default@example.com|(PROV'.$ids['contact of the invoice'].'), (PROV'.$ids['default contact of the customer'].')'), $hook->mails);
+	}
+
+	/**
+	 * The name of a customer without recipient is shown as text in the error, never as HTML
+	 *
+	 * @return void
+	 */
+	public function testDunningNoRecipientEscaped()
+	{
+		$this->captureMails();
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('');
+		$this->assertTrue((bool) $this->savdb->query("UPDATE ".$this->savdb->prefix()."societe SET nom = 'DUNNINGTEST <span onmouseover=\"alert(1)\">x</span>' WHERE rowid = ".((int) $socid)));
+		$id = $this->createInvoice($socid, -1);
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame(1, $dunning->send($this->savuser, array($rows[$id])));
+		$this->assertStringContainsString('DUNNINGTEST', $dunning->errors[0]);
+		$this->assertStringNotContainsString('<span', $dunning->errors[0]);
+	}
+
+	/**
+	 * Rule 7: one email per customer and level when the level asks for it (or the action of the screen), then one event per invoice
+	 *
+	 * @return void
+	 */
+	public function testDunningSummaryPerCustomer()
+	{
+		$hook = $this->captureMails();
+		$this->createLevels(array(-5));
+		$this->createLevels(array(0), array('percustomer' => 1));
+		$socids = array();
+		foreach (array('a', 'b', 'c', 'd') as $name) {
+			$socids[$name] = $this->createCustomer($name.'@example.com');
+		}
+		// Due 5 or 2 days ago: level of 0 days, one email per customer. Due in 3 or 4 days: level of -5 days, one email per invoice
+		$ids = array();
+		foreach (array('a1' => -5, 'a2' => -2, 'b1' => -2, 'c1' => 3, 'c2' => 4, 'd1' => 3, 'd2' => 4) as $key => $days) {
+			$ids[$key] = $this->createInvoice($socids[$key[0]], $days);
+		}
+
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socids['a'], $socids['b'], $socids['c']));
+		$this->assertSame(0, $dunning->send($this->savuser, $rows), implode(', ', $dunning->errors));
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socids['d']));
+		$this->assertSame(0, $dunning->send($this->savuser, $rows, 1), implode(', ', $dunning->errors));
+		$this->assertSame(array(
+			'a@example.com|(PROV'.$ids['a1'].'), (PROV'.$ids['a2'].')',
+			'b@example.com|(PROV'.$ids['b1'].')',
+			'c@example.com|(PROV'.$ids['c1'].')',
+			'c@example.com|(PROV'.$ids['c2'].')',
+			'd@example.com|(PROV'.$ids['d1'].'), (PROV'.$ids['d2'].')',
+		), $hook->mails);
+		$this->assertCount(7, $dunning->getEvents(array_values($ids)), 'One event per invoice');
+	}
+
+
+	/**
+	 * Rule 7: the tab of an invoice sends with it the other invoices of its customer due at a level of one email per customer
+	 *
+	 * @return void
+	 */
+	public function testDunningEmailGroup()
+	{
+		$levels = $this->createLevels(array(-5));
+		$this->createLevels(array(0), array('percustomer' => 1));
+		$socid = $this->createCustomer('group@example.com');
+		// Due 5 and 2 days ago: level of 0 days. Due in 3 or 4 days: level of -5 days. Due 1 day ago with a promise: not due
+		$ids = array();
+		foreach (array('first' => -5, 'second' => -2, 'other level' => 3, 'other level too' => 4, 'promised' => -1) as $key => $days) {
+			$ids[$key] = $this->createInvoice($socid, $days);
+		}
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame(1, $dunning->addPromise($this->savuser, array($rows[$ids['promised']]), dol_time_plus_duree(dol_now(), 5, 'd', 0, 'tzserver'), ''), $dunning->error);
+
+		$this->assertSame(array($ids['first'], $ids['second']), array_keys($dunning->getEmailGroup($this->savuser, $rows[$ids['first']])));
+		$this->assertSame(array($ids['other level']), array_keys($dunning->getEmailGroup($this->savuser, $rows[$ids['other level']])), 'One email per invoice at this level');
+		$this->assertSame($levels[-5], $rows[$ids['other level']]->next->rowid);
+	}
+
+	/**
+	 * Rule 8: the template of the level in the language of the customer, else the template of the level
+	 *
+	 * @return void
+	 */
+	public function testDunningTemplateLanguage()
+	{
+		$db = $this->savdb;
+		$hook = $this->captureMails();
+		$this->createLevels(array(0));
+		$levels = (new Dunning($db))->fetchLevels();
+		$label = reset($levels)->template_label;
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."c_email_templates (entity, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content) VALUES (1, 'facture_send', 0, '".$db->idate(dol_now())."', '".$db->escape($label)."', 'fr_FR', 990, '1', 1, 'Relance __REF__', 0, 'Contenu')"), (string) $db->lasterror());
+		$fr = $this->createCustomer('fr@example.com', 'fr_FR');
+		$de = $this->createCustomer('de@example.com', 'de_DE');
+		$idfr = $this->createInvoice($fr, -1);
+		$idde = $this->createInvoice($de, -1);
+
+		$dunning = new Dunning($db);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($fr, $de));
+		$this->assertSame(0, $dunning->send($this->savuser, $rows), implode(', ', $dunning->errors));
+		$this->assertSame(array('fr@example.com|Relance (PROV'.$idfr.')', 'de@example.com|(PROV'.$idde.')'), $hook->mails);
+	}
+
+	/**
+	 * Rule 9: the job does nothing while the reminder job of the core, or a clone of it, is enabled
+	 *
+	 * @return void
+	 */
+	public function testDunningCoreJobEnabled()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$dunning = new Dunning($db);
+		$this->assertFalse($dunning->isCoreJobEnabled());
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."cronjob (entity, datec, jobtype, label, objectname, methodename, status) VALUES (".((int) $conf->entity).", '".$db->idate(dol_now())."', 'method', 'DUNNINGTEST core job', 'Facture', 'sendEmailsRemindersOnInvoiceDueDate', 1)"), (string) $db->lasterror());
+
+		$this->assertSame(1, $dunning->sendReminders());
+		$this->assertSame($langs->trans('DunningCoreJobEnabled', $langs->transnoentitiesnoconv('SendEmailsRemindersOnInvoiceDueDate')), $dunning->error);
+		$this->assertSame(0, getDolGlobalInt('DUNNING_START_DATE'), 'The job stopped before its first run');
+	}
+
+	/**
+	 * Rule 10: the first run records its date and never sends a level reached before it
+	 *
+	 * @return void
+	 */
+	public function testDunningFirstRun()
+	{
+		$now = dol_now();	// One date for the whole test, even at midnight
+		$hook = $this->captureMails();
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('firstrun@example.com');
+		$old = $this->createInvoice($socid, -30, '', $now);
+		$new = $this->createInvoice($socid, 0, '', $now);
+
+		$dunning = new Dunning($this->savdb);
+		$this->assertSame(0, getDolGlobalInt('DUNNING_START_DATE'));
+		$this->assertSame(0, $dunning->sendReminders($now), $dunning->error.implode(', ', $dunning->errors));
+		$this->assertSame($now, getDolGlobalInt('DUNNING_START_DATE'));
+		$this->assertSame(array('firstrun@example.com|(PROV'.$new.')'), $hook->mails);
+		$rows = $dunning->getInvoices($this->savuser, $now, array($socid));
+		$this->assertSame(array(true, false), array($rows[$old]->due, $rows[$old]->auto), 'Due, left for a decision by hand');
+	}
+
+	/**
+	 * The list: one line per customer with an invoice whose level was sent or is due, its totals, its most advanced level and its next reminder
+	 *
+	 * @return void
+	 */
+	public function testDunningCustomers()
+	{
+		global $conf;
+
+		$now = dol_now();	// One date for the whole test, even at midnight
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree($now, -2, 'd', 0, 'tzserver');
+		$levels = $this->createLevels(array(0, 10));
+		$due = $this->createCustomer('due@example.com');
+		$this->createInvoice($due, -35, '', $now);	// Reached before the first run of the job: left to a user
+		$this->createInvoice($due, -1, '', $now);
+		$auto = $this->createCustomer('auto@example.com');
+		$this->createInvoice($auto, -1, '', $now);
+		$sent = $this->createCustomer('sent@example.com');
+		$id = $this->createInvoice($sent, -3, '', $now);
+		$this->addSentEvent($id, $sent, $levels[0], $now);
+		$notyet = $this->createCustomer('notyet@example.com');
+		$this->createInvoice($notyet, 5, '', $now);
+
+		$dunning = new Dunning($this->savdb);
+		$customers = $dunning->getCustomers($this->savuser, $now);
+		$this->assertArrayNotHasKey($notyet, $customers, 'No level reached yet');
+		$customer = $customers[$due];
+		$this->assertSame(array(2, 240.0, 120.0, null, $levels[0], true, true), array($customer['nb'], $customer['remain'], $customer['late30'], $customer['level'], $customer['next']->rowid, $customer['due'], $customer['byhand']));
+		$this->assertSame(array(true, false), array($customers[$auto]['due'], $customers[$auto]['byhand']), 'Due, left to the job');
+		$customer = $customers[$sent];
+		$this->assertSame(array(1, $levels[0], $levels[10], false, false), array($customer['nb'], $customer['level']->rowid, $customer['next']->rowid, $customer['due'], $customer['byhand']), 'In the circuit, nothing to send now');
+	}
+
+	/**
+	 * Rule 11: a level by hand waits for a user, then the next levels go on; the dashboard counts the customers to remind like the list
+	 *
+	 * @return void
+	 */
+	public function testDunningByHand()
+	{
+		global $conf;
+
+		$now = dol_now();	// One date for the whole test, even at midnight
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree($now, -30, 'd', 0, 'tzserver');	// Not a first run
+		$hook = $this->captureMails();
+		$byhand = $this->createLevels(array(0), array('byhand' => 1));
+		$auto = $this->createLevels(array(10));
+		$late = array($this->createCustomer('byhand1@example.com'), $this->createCustomer('byhand2@example.com'));
+		$id = $this->createInvoice($late[0], -12, '', $now);
+		$this->createInvoice($late[1], -1, '', $now);
+		$today = $this->createCustomer('byhandtoday@example.com');
+		$this->createInvoice($today, 0, '', $now);
+		$notdue = $this->createCustomer('byhandnotdue@example.com');
+		$sentid = $this->createInvoice($notdue, -1, '', $now);
+		$this->addSentEvent($sentid, $notdue, $auto[10], $now);	// Last level sent: in the circuit, nothing more to send
+
+		// The job leaves the level by hand to a user
+		$dunning = new Dunning($this->savdb);
+		$this->assertSame(0, $dunning->sendReminders($now), $dunning->error.implode(', ', $dunning->errors));
+		$this->assertSame(array(), $hook->mails);
+		$rows = $dunning->getInvoices($this->savuser, $now, array($late[0]));
+		$this->assertSame(array($byhand[0], true, false), array($rows[$id]->next->rowid, $rows[$id]->due, $rows[$id]->auto));
+
+		// Dashboard and list: the customers with a reminder due, late when due before today
+		$customers = $dunning->getCustomers($this->savuser, dol_now(), 0, 1);
+		$board = $dunning->load_board($this->savuser);
+		$this->assertInstanceOf(WorkboardResponse::class, $board);
+		$this->assertSame(array(true, true, true), array(isset($customers[$late[0]]), isset($customers[$late[1]]), isset($customers[$today])));
+		$this->assertArrayNotHasKey($notdue, $customers, 'In the circuit, nothing due');
+		$this->assertArrayHasKey($notdue, $dunning->getCustomers($this->savuser, dol_now()));
+		$nblate = 0;
+		foreach ($customers as $customer) {
+			$nblate += ($customer['nextdate'] < dol_get_first_hour(dol_now()) ? 1 : 0);
+		}
+		$this->assertSame(array(count($customers), $nblate), array($board->nbtodo, $board->nbtodolate));
+		$first = dol_get_first_hour($now);
+		$this->assertSame(array(true, true, false), array($customers[$late[0]]['nextdate'] < $first, $customers[$late[1]]['nextdate'] < $first, $customers[$today]['nextdate'] < $first), 'Late when due before today');
+		$reader = clone $this->savuser;
+		$reader->admin = 0;
+		$reader->rights = (object) array('dunning' => (object) array('read' => 1), 'facture' => (object) array('lire' => 1), 'societe' => (object) array('client' => (object) array('voir' => 1)));
+		$this->assertSame(-1, $dunning->load_board($reader), 'Only for the users who act on the reminders');
+
+		// Sent by hand, then the next level goes on with the job
+		$this->assertSame(0, $dunning->send($this->savuser, array($rows[$id])), implode(', ', $dunning->errors));
+		$later = dol_time_plus_duree($now, 10, 'd', 0, 'tzserver');
+		$this->assertSame(0, $dunning->sendReminders($later), $dunning->error.implode(', ', $dunning->errors));
+		$this->assertSame(array('byhand1@example.com|(PROV'.$id.')', 'byhand1@example.com|(PROV'.$id.')'), $hook->mails);
+		$rows = $dunning->getInvoices($this->savuser, $later, array($late[0]));
+		$this->assertSame($auto[10], $rows[$id]->last->rowid);
+	}
+
+	/**
+	 * Hooks of the home page: the line of the customers to remind, in the group Invoices, only for the users who act on the reminders
+	 *
+	 * @return void
+	 */
+	public function testDunningDashboardHook()
+	{
+		global $conf, $user;
+
+		$hooks = new ActionsDunning($this->savdb);
+		$object = new stdClass();
+		$action = '';
+		$groups = array('facture' => array('groupName' => 'Invoices', 'globalStatsKey' => 'invoices', 'stats' => array('facture')), 'propal' => array('stats' => array('propal_opened')));
+		$this->assertSame(0, $hooks->addOpenElementsDashboardGroup(array('dashboardgroup' => $groups), $object, $action, null));
+		$this->assertSame(array('facture' => array('groupName' => 'Invoices', 'globalStatsKey' => 'invoices', 'stats' => array('facture', 'dunning'))), $hooks->results, 'The whole group Invoices, with the line added');
+
+		$saveuser = $user;
+		$user = $this->savuser;
+		$hooks->results = array();
+		$hooks->addOpenElementsDashboardLine(array(), $object, $action, null);
+		$this->assertInstanceOf(WorkboardResponse::class, $hooks->results['dunning'] ?? null);
+		$this->assertStringContainsString('/dunning/list.php?search_due=1', $hooks->results['dunning']->url);
+		$conf->global->MAIN_DISABLE_BLOCK_CUSTOMER = 1;
+		$hooks->results = array();
+		$hooks->addOpenElementsDashboardLine(array(), $object, $action, null);
+		unset($conf->global->MAIN_DISABLE_BLOCK_CUSTOMER);
+		$this->assertSame(array(), $hooks->results, 'Hidden with the other customer blocks');
+		$user = clone $this->savuser;
+		$user->admin = 0;
+		$user->rights = (object) array('dunning' => (object) array('read' => 1), 'facture' => (object) array('lire' => 1));
+		$hooks->addOpenElementsDashboardLine(array(), $object, $action, null);
+		$user = $saveuser;
+		$this->assertSame(array(), $hooks->results, 'Only for the users who can send');
+	}
+
+	/**
+	 * First activation: the email templates in French and English, kept when the module is enabled again,
+	 * and the default levels only on a setup without levels
+	 *
+	 * @return void
+	 */
+	public function testDunningDefaultLevels()
+	{
+		global $conf;
+
+		$db = $this->savdb;
+		$count = "SELECT COUNT(rowid) as nb FROM ".$db->prefix()."c_email_templates WHERE entity = ".((int) $conf->entity)." AND module = 'dunning'";
+		$this->assertSame(6, $this->countRows($count), 'The templates created at the activation');
+		$dunning = new Dunning($db);
+		$this->assertSame(0, $dunning->initTemplates(), 'Run again like at each activation: the templates already there are kept');
+		$this->assertTrue((bool) $db->query("DELETE FROM ".$db->prefix()."c_email_templates WHERE entity = ".((int) $conf->entity)." AND module = 'dunning' AND lang = 'en_US'"));
+		$this->assertSame(3, $dunning->initTemplates(), 'Only the missing ones');
+		$this->assertSame(6, $this->countRows($count));
+
+		$reader = clone $this->savuser;
+		$reader->admin = 0;
+		$this->assertSame(array(0, array()), array($dunning->initDefaultLevels($reader), $dunning->fetchLevels()), 'Only an administrator');
+		$this->assertSame(3, $dunning->initDefaultLevels($this->savuser), (string) $dunning->error);
+		$levels = array_values($dunning->fetchLevels());
+		$summary = array();
+		foreach ($levels as $level) {
+			$summary[] = array($level->nbdays, $level->percustomer, $level->byhand, $level->template_label, $level->fk_c_type_contact > 0);
+		}
+		$this->assertSame(array(
+			array(-3, 0, 0, 'Relances - 1 Courtoisie / Courtesy', true),
+			array(15, 1, 0, 'Relances - 2 Relance / Reminder', true),
+			array(30, 1, 1, 'Relances - 3 Mise en demeure / Formal notice', true),
+		), $summary, 'Courtesy before the due date, then one email per customer, the last one by hand, to the billing contact');
+		$this->assertSame(0, $dunning->initDefaultLevels($this->savuser), 'Never on a setup with levels');
+	}
+
+	/**
+	 * Keys __DUNNING_*__ of the email forms: declared in the editor of the templates, with the values of the invoice in its email form,
+	 * and nothing for the other callers (PDF, ODT, jobs)
+	 *
+	 * @return void
+	 */
+	public function testDunningSubstitutionKeys()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$keys = array();
+		dunning_completesubstitutionarray($keys, $langs, null, array('mode' => 'formemail'));
+		$this->assertSame(array('__DUNNING_LEVEL__', '__DUNNING_DAYS_LATE__', '__DUNNING_INVOICES__', '__DUNNING_TOTAL_REMAIN__', '__DUNNING_PENALTIES__',
+			'__DUNNING_INDEMNITY__', '__DUNNING_TOTAL_WITH_PENALTIES__', '__DUNNING_PENALTIES_TEXT__'), array_keys($keys));
+		$this->assertSame('Name of the reminder level', $keys['__DUNNING_LEVEL__']);
+		$other = array('__REF__' => 'x');
+		dunning_completesubstitutionarray($other, $langs, null, null);
+		$this->assertSame(array('__REF__' => 'x'), $other, 'Nothing for a PDF or a job');
+
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree(dol_now(), -30, 'd', 0, 'tzserver');
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('keys@example.com');
+		$invoice = new Facture($db);
+		$invoice->fetch($this->createInvoice($socid, -5));
+		$values = array();
+		dunning_completesubstitutionarray($values, $langs, $invoice, array('mode' => 'formemail'));
+		$this->assertSame(array('DUNNINGTEST 0', '5', ''), array($values['__DUNNING_LEVEL__'], $values['__DUNNING_DAYS_LATE__'], $values['__DUNNING_PENALTIES_TEXT__']));
+		$this->assertStringContainsString($invoice->ref, $values['__DUNNING_INVOICES__']);
+		$paid = new Facture($db);
+		$paid->fetch($this->createInvoice($socid, -5, 'paye = 1'));
+		$values = array();
+		dunning_completesubstitutionarray($values, $langs, $paid, array('mode' => 'formemail'));
+		$this->assertSame(array('', ''), array($values['__DUNNING_LEVEL__'], $values['__DUNNING_INVOICES__']), 'Not reminded: empty values');
+	}
+
+	/**
+	 * Late penalties and recovery indemnity: only for companies not exempted, rest to pay x rate x days late / 365, indemnity once per invoice,
+	 * the setup typed with a comma or a dot
+	 *
+	 * @return void
+	 */
+	public function testDunningPenalties()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$now = dol_now();
+		$company = $this->createCustomer('company@example.com');
+		$person = $this->createCustomer('person@example.com');	// No VAT number nor professional id: not a company for the core
+		$exempt = $this->createCustomer('exempt@example.com');
+		$this->assertTrue((bool) $db->query("UPDATE ".$db->prefix()."societe SET tva_intra = 'FR00123456789' WHERE rowid IN (".((int) $company).", ".((int) $exempt).")"), (string) $db->lasterror());
+		$category = new Categorie($db);
+		$category->label = 'DUNNINGTEST no penalty';
+		$category->type = Categorie::TYPE_CUSTOMER;
+		$this->assertGreaterThan(0, $category->create($this->savuser), (string) $category->error);
+		$soc = new Societe($db);
+		$soc->id = $exempt;
+		$this->assertGreaterThan(0, $category->add_type($soc, Categorie::TYPE_CUSTOMER));
+		$this->createLevels(array(0));
+		$ids = array('company' => $this->createInvoice($company, -30), 'person' => $this->createInvoice($person, -30), 'exempt' => $this->createInvoice($exempt, -30),
+			'notlate' => $this->createInvoice($company, 0));
+		$dunning = new Dunning($db);
+
+		$rows = $dunning->getInvoices($this->savuser, $now, array($company, $person, $exempt));
+		$this->assertSame(array('days' => 30, 'penalties' => 0.0, 'indemnity' => 0.0), $dunning->getPenalties($rows[$ids['company']], $now), 'Nothing set up');
+		$conf->global->DUNNING_PENALTY_RATE = '12,40';
+		$conf->global->DUNNING_FIXED_INDEMNITY = '40';
+		$conf->global->DUNNING_NOPENALTY_CATEGORY = $category->id;
+		$rows = $dunning->getInvoices($this->savuser, $now, array($company, $person, $exempt), 0);
+		$this->assertSame(array('days' => 30, 'penalties' => 1.22, 'indemnity' => 40.0), $dunning->getPenalties($rows[$ids['company']], $now), '120 x 12.40 % x 30 / 365');
+		$this->assertSame(array('days' => 30, 'penalties' => 0.0, 'indemnity' => 0.0), $dunning->getPenalties($rows[$ids['person']], $now), 'An individual');
+		$this->assertSame(array('days' => 30, 'penalties' => 0.0, 'indemnity' => 0.0), $dunning->getPenalties($rows[$ids['exempt']], $now), 'Exempted by the tag');
+		$notlate = $dunning->getInvoices($this->savuser, $now, array(), 0, $ids['notlate']);
+		$this->assertSame(array('days' => 0, 'penalties' => 0.0, 'indemnity' => 0.0), $dunning->getPenalties($notlate[$ids['notlate']], $now), 'Not late');
+		$conf->global->DUNNING_PENALTY_RATE = '12.40';
+		$this->assertSame(1.22, $dunning->getPenalties($rows[$ids['company']], $now)['penalties'], 'A dot as well');
+
+		$level = (object) array('label' => 'DUNNINGTEST');
+		$subst = $dunning->getSubstitutions(array($rows[$ids['company']]), $level, $langs, $now);
+		$amounts = array();
+		foreach (array(1.22, 40, 161.22) as $amount) {
+			$amounts[] = price($amount, 0, $langs, 1, -1, -1, $conf->currency);
+		}
+		$this->assertSame($amounts, array($subst['__DUNNING_PENALTIES__'], $subst['__DUNNING_INDEMNITY__'], $subst['__DUNNING_TOTAL_WITH_PENALTIES__']), '120 + 1.22 + 40');
+		$this->assertStringContainsString('L441-10', $subst['__DUNNING_PENALTIES_TEXT__']);
+		$this->assertStringContainsString(price(12.4, 0, $langs).' %', $subst['__DUNNING_PENALTIES_TEXT__']);
+		$this->assertStringContainsString('Penalties', $subst['__DUNNING_INVOICES__'], 'A column in the table of the invoices');
+		$subst = $dunning->getSubstitutions(array($rows[$ids['person']]), $level, $langs, $now);
+		$this->assertSame('', $subst['__DUNNING_PENALTIES_TEXT__'], 'Nothing due: no sentence');
+		$this->assertStringNotContainsString('Penalties', $subst['__DUNNING_INVOICES__'], 'Nor column');
+		$conf->global->DUNNING_PENALTY_RATE = '';
+		$subst = $dunning->getSubstitutions(array($rows[$ids['company']]), $level, $langs, $now);
+		$this->assertStringContainsString(' is due', $subst['__DUNNING_PENALTIES_TEXT__'], 'The indemnity alone');
+	}
+
+	/**
+	 * Penalty invoice: a separate draft invoice of the penalties and the indemnity, linked to the invoice, created once
+	 *
+	 * @return void
+	 */
+	public function testDunningPenaltyInvoice()
+	{
+		global $conf;
+
+		$db = $this->savdb;
+		$conf->global->DUNNING_PENALTY_RATE = '12.40';
+		$conf->global->DUNNING_FIXED_INDEMNITY = '40';
+		$socid = $this->createCustomer('penalty@example.com');
+		$this->assertTrue((bool) $db->query("UPDATE ".$db->prefix()."societe SET tva_intra = 'FR00123456789' WHERE rowid = ".((int) $socid)), (string) $db->lasterror());
+		$this->createLevels(array(0));
+		$id = $this->createInvoice($socid, -30);
+		$dunning = new Dunning($db);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+
+		$reader = clone $this->savuser;
+		$reader->rights = (object) array('dunning' => (object) array('read' => 1, 'write' => 1), 'facture' => (object) array('lire' => 1));
+		$this->assertSame(-1, $dunning->createPenaltyInvoice($reader, $rows[$id]), 'The right to create invoices is needed');
+		$penaltyid = $dunning->createPenaltyInvoice($this->savuser, $rows[$id]);
+		$this->assertGreaterThan(0, $penaltyid, $dunning->error);
+		$penalty = new Facture($db);
+		$penalty->fetch($penaltyid);
+		$penalty->fetchObjectLinked($id, 'facture', $penaltyid, 'facture');
+		$lines = array();
+		foreach ($penalty->lines as $line) {
+			$lines[] = array((float) $line->total_ht, (float) $line->tva_tx, (int) $line->product_type);
+		}
+		$this->assertSame(array(Facture::STATUS_DRAFT, $socid, array(array(1.22, 0.0, 1), array(40.0, 0.0, 1))), array((int) $penalty->status, (int) $penalty->socid, $lines), 'Draft, two service lines without VAT');
+		$this->assertSame(array($id), array_map('intval', array_values($penalty->linkedObjectsIds['facture'] ?? array())), 'Linked to the invoice');
+
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame($penaltyid, $rows[$id]->penaltyinvoice);
+		$this->assertSame(-1, $dunning->createPenaltyInvoice($this->savuser, $rows[$id]), 'Once per invoice');
+		$person = $this->createCustomer('nopenalty@example.com');
+		$other = $this->createInvoice($person, -30);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($person));
+		$this->assertSame(-1, $dunning->createPenaltyInvoice($this->savuser, $rows[$other]), 'Nothing due');
+	}
+
+	/**
+	 * Rights: read, write, sales representative, external user, administrator for the levels, all customers for the job
+	 *
+	 * @return void
+	 */
+	public function testDunningRights()
+	{
+		global $conf, $user;
+
+		$db = $this->savdb;
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('rights@example.com');
+		$id = $this->createInvoice($socid, -2);
+		$dunning = new Dunning($db);
+		$rows = $dunning->getInvoices($user, dol_now(), array($socid));
+		$this->assertSame(array($id), array_keys($rows));
+
+		// Reads the reminders of its own customers only, nothing else
+		$reader = clone $user;
+		$reader->admin = 0;
+		$reader->rights = (object) array('dunning' => (object) array('read' => 1), 'facture' => (object) array('lire' => 1), 'societe' => (object) array('client' => (object) array()));
+		$this->assertSame(array(), $dunning->getInvoices($reader, dol_now(), array($socid)), 'Not its customer');
+		$soc = new Societe($db);
+		$soc->id = $socid;
+		$soc->add_commercial($user, $reader->id);
+		$this->assertSame(array($id), array_keys($dunning->getInvoices($reader, dol_now(), array($socid))), 'Its customer');
+		$this->assertSame(-1, $dunning->send($reader, $rows));
+		$this->assertSame(-1, $dunning->addPromise($reader, $rows, dol_now(), ''));
+		$this->assertSame(-1, $dunning->excludeThirdparties($reader, array($socid)));
+		$this->assertSame(-1, $dunning->saveLevel($reader, array('rowid' => 0, 'label' => 'DUNNINGTEST', 'nbdays' => 99, 'fk_c_type_contact' => 0, 'fk_email_template' => 1, 'active' => 1)));
+		$admin = $user;
+		$user = $reader;
+		$result = $dunning->sendReminders();
+		$user = $admin;
+		$this->assertSame(1, $result, 'The job needs to see all customers');
+
+		$reader->rights->dunning->write = 1;
+		$this->assertSame(-1, $dunning->excludeThirdparties($reader, array($socid)), 'Excluding also needs to edit thirdparties');
+		$reader->rights->facture->lire = 0;
+		$this->assertSame(-1, $dunning->getInvoices($reader, dol_now()), 'Reading reminders also needs to read invoices');
+		$reader->rights->facture->lire = 1;
+		$reader->rights->dunning->read = 0;
+		$this->assertSame(-1, $dunning->getInvoices($reader, dol_now()));
+		$external = clone $user;
+		$external->socid = $socid;
+		$this->assertSame(-1, $dunning->getInvoices($external, dol_now()));
+
+		// With the advanced permissions, sending also needs the right to send invoices by email
+		$savadvanced = getDolGlobalString('MAIN_USE_ADVANCED_PERMS');
+		$conf->global->MAIN_USE_ADVANCED_PERMS = 1;
+		$reader->rights->facture->invoice_advance = (object) array('send' => 0);
+		$cansend = $dunning->canSend($reader);
+		$result = $dunning->send($reader, $rows);
+		$reader->rights->facture->invoice_advance->send = 1;
+		$cansendwithright = $dunning->canSend($reader);
+		$conf->global->MAIN_USE_ADVANCED_PERMS = $savadvanced;
+		$this->assertSame(array(false, -1, true), array($cansend, $result, $cansendwithright));
+	}
+
+	/**
+	 * Levels: created and changed one by one by an administrator, label and template required, never two levels with the same days
+	 *
+	 * @return void
+	 */
+	public function testDunningSaveLevel()
+	{
+		global $langs;
+
+		$levels = $this->createLevels(array(6, 3, 12));	// Not created in the order of the days
+		$dunning = new Dunning($this->savdb);
+		$all = $dunning->fetchLevels();
+		$this->assertSame(array($levels[3], $levels[6], $levels[12]), array_values(array_intersect(array_keys($all), $levels)), 'Sorted by days');
+		$level = (array) $all[$levels[3]];
+		unset($level['template_label']);
+		$level['label'] = 'DUNNINGTEST changed';
+		$level['nbdays'] = 4;
+		$level['active'] = 0;
+		$level['percustomer'] = 1;
+		$level['byhand'] = 1;
+		$this->assertSame($levels[3], $dunning->saveLevel($this->savuser, $level), $dunning->error);
+		$all = $dunning->fetchLevels();
+		$this->assertSame(array('DUNNINGTEST changed', 4, 0, 1, 1), array($all[$levels[3]]->label, $all[$levels[3]]->nbdays, $all[$levels[3]]->active, $all[$levels[3]]->percustomer, $all[$levels[3]]->byhand), 'A disabled level is still loaded');
+		$this->assertSame(array('DUNNINGTEST 6', 6, 1, 0, 0), array($all[$levels[6]]->label, $all[$levels[6]]->nbdays, $all[$levels[6]]->active, $all[$levels[6]]->percustomer, $all[$levels[6]]->byhand), 'The other level is not changed');
+		$six = (array) $all[$levels[6]];
+		unset($six['template_label']);
+		$this->assertSame($levels[6], $dunning->saveLevel($this->savuser, $six), 'Saved again with its own days');
+
+		$level['nbdays'] = 6;
+		$this->assertSame(-1, $dunning->saveLevel($this->savuser, $level));
+		$this->assertSame($langs->trans('DunningErrorSameDays'), $dunning->error);
+		$this->assertArrayHasKey($levels[6], $dunning->fetchLevels(), 'No statement failed: the transaction goes on, also with PostgreSQL');
+		foreach (array('label' => '', 'fk_email_template' => 0) as $field => $value) {
+			$this->assertSame(-1, $dunning->saveLevel($this->savuser, array_merge($level, array('nbdays' => 9, $field => $value))), $field.' is required');
+		}
+		$notadmin = clone $this->savuser;
+		$notadmin->admin = 0;
+		$this->assertSame(-1, $dunning->saveLevel($notadmin, array_merge($level, array('nbdays' => 9))), 'Only an administrator');
+		$db = $this->savdb;
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."dunning_level (entity, label, nbdays, fk_email_template) VALUES (2, 'DUNNINGTEST entity 2', 9, 1)"), (string) $db->lasterror());
+		$entity2 = $db->last_insert_id($db->prefix().'dunning_level');
+		$dunning->saveLevel($this->savuser, array_merge($level, array('rowid' => $entity2, 'nbdays' => 10, 'label' => 'DUNNINGTEST changed')));
+		$obj = $db->fetch_object($db->query("SELECT label, nbdays FROM ".$db->prefix()."dunning_level WHERE rowid = ".((int) $entity2)));
+		$this->assertSame(array('DUNNINGTEST entity 2', 9), array($obj->label, (int) $obj->nbdays), 'A level of another entity is not changed');
+		$new = $dunning->saveLevel($this->savuser, array_merge($level, array('rowid' => 0, 'nbdays' => 9, 'label' => 'DUNNINGTEST'.str_repeat('x', 130))));
+		$this->assertGreaterThan(0, $new, 'The same days as a level of another entity');
+		$all = $dunning->fetchLevels();
+		$this->assertArrayNotHasKey($entity2, $all, 'Only the levels of the entity');
+		$this->assertSame(128, dol_strlen($all[$new]->label), 'Label cut to the size of its column');
+	}
+
+	/**
+	 * The email: a text template sent as HTML, the PDF of each invoice attached, an error for a missing sender or template
+	 *
+	 * @return void
+	 */
+	public function testDunningEmailContent()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$hook = $this->captureMails();
+		$this->createLevels(array(0), array(), array('content' => "Line one\nLevel __DUNNING_LEVEL__", 'joinfiles' => 1));
+		$socid = $this->createCustomer('content@example.com');
+		$id = $this->createInvoice($socid, -1);
+		$dir = 'facture/DUNNINGTEST'.$id;
+		$this->assertTrue((bool) $db->query("UPDATE ".$db->prefix()."facture SET last_main_doc = '".$db->escape($dir)."/test.pdf' WHERE rowid = ".((int) $id)), (string) $db->lasterror());
+		dol_mkdir(DOL_DATA_ROOT.'/'.$dir);
+		file_put_contents(DOL_DATA_ROOT.'/'.$dir.'/test.pdf', '%PDF-1.4');
+		$dunning = new Dunning($db);
+		try {
+			$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+			$this->assertSame(0, $dunning->send($this->savuser, $rows), implode(', ', $dunning->errors));
+		} finally {
+			dol_delete_dir_recursive(DOL_DATA_ROOT.'/'.$dir);
+		}
+		$this->assertSame(array(array('test.pdf')), $hook->files);
+		$this->assertStringContainsString('Line one<br', $hook->bodies[0]);
+		$this->assertStringContainsString('Level DUNNINGTEST 0', $hook->bodies[0]);
+
+		// No sender, then no template (deleted after the setup of the level): an error each, nothing sent
+		$id = $this->createInvoice($socid, -1);
+		$conf->global->MAIN_MAIL_EMAIL_FROM = '';
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame(1, $dunning->send($this->savuser, array($rows[$id])));
+		$this->assertStringContainsString($langs->trans('ErrorSetupOfEmailsNotComplete'), $dunning->errors[0]);
+		$conf->global->MAIN_MAIL_EMAIL_FROM = 'robot@example.com';
+		$levels = $dunning->fetchLevels();
+		$label = reset($levels)->template_label;
+		$this->assertTrue((bool) $db->query("DELETE FROM ".$db->prefix()."c_email_templates WHERE label = '".$db->escape($label)."'"), (string) $db->lasterror());
+		$dunning = new Dunning($db);	// The templates found are kept during a run
+		$this->assertSame(1, $dunning->send($this->savuser, array($rows[$id])));
+		$this->assertStringContainsString($langs->trans('ErrorFailedToFindEmailTemplate', $label), $dunning->errors[0]);
+		$this->assertCount(1, $hook->mails);
+	}
+
+	/**
+	 * Replace the sending of emails by a hook that records them
+	 *
+	 * @return CommonHookActions	Hook, with the recipients and subject of each email in ->mails, its files in ->files, its body in ->bodies
+	 */
+	private function captureMails()
+	{
+		global $conf, $hookmanager;
+
+		$this->savhookmanager = $hookmanager;
+		$this->savmailfrom = getDolGlobalString('MAIN_MAIL_EMAIL_FROM');
+		$conf->global->MAIN_DISABLE_ALL_MAILS = 0;
+		$conf->global->MAIN_MAIL_EMAIL_FROM = 'robot@example.com';
+		$hook = new class extends CommonHookActions {
+			/**
+			 * @var string[] Recipients and subject of each email
+			 */
+			public $mails = array();
+
+			/**
+			 * @var array<int,string[]> Names of the files attached to each email
+			 */
+			public $files = array();
+
+			/**
+			 * @var string[] Body of each email
+			 */
+			public $bodies = array();
+
+			/**
+			 * Record the email instead of sending it
+			 *
+			 * @param	array<string,mixed>	$parameters		Hook parameters
+			 * @param	CMailFile			$object			Email
+			 * @return	int									1 to replace the sending
+			 */
+			public function sendMail($parameters, $object)
+			{
+				$this->mails[] = $object->addr_to.'|'.$object->subject;
+				$this->files[] = $object->mimefilename_list;
+				$this->bodies[] = (string) $object->html;
+				return 1;
+			}
+		};
+		$hookmanager = new HookManager($this->savdb);
+		$hookmanager->contextarray = array('mail');
+		$hookmanager->hooks['mail']['dunningtest'] = $hook;
+		$hookmanager->hooksSorted['mail']['50:dunningtest'] = $hook;
+
+		return $hook;
+	}
+
+	/**
+	 * Number of rows counted by a query
+	 *
+	 * @param	string	$sql	Query returning the column nb
+	 * @return	int				Number
+	 */
+	private function countRows($sql)
+	{
+		$resql = $this->savdb->query($sql);
+		$this->assertTrue((bool) $resql, (string) $this->savdb->lasterror());
+
+		return (int) $this->savdb->fetch_object($resql)->nb;
+	}
+
+	/**
+	 * Create levels of the invoices and their email template (subject: the refs of the invoices)
+	 *
+	 * @param	int[]						$days		Days of the levels
+	 * @param	array<string,int>			$values		Other values of the levels
+	 * @param	array<string,int|string>	$template	Values of the template: topic, joinfiles, content
+	 * @return	array<int,int>							Rowid of the levels by days
+	 */
+	private function createLevels(array $days, array $values = array(), array $template = array())
+	{
+		$db = $this->savdb;
+		$template = array_merge(array('topic' => '__REF__', 'joinfiles' => 0, 'content' => '__DUNNING_INVOICES__'), $template);
+		$label = 'DUNNINGTEST '.(++$this->nbtemplates);	// A label of its own: the templates have a unique key on entity, label and language
+		$sql = "INSERT INTO ".$db->prefix()."c_email_templates (entity, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content)";
+		$sql .= " VALUES (1, 'facture_send', 0, '".$db->idate(dol_now())."', '".$db->escape($label)."', '', 990, '1', 1, '".$db->escape((string) $template['topic'])."', ".((int) $template['joinfiles']).", '".$db->escape((string) $template['content'])."')";
+		$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+		$template = $db->last_insert_id($db->prefix().'c_email_templates');
+		$dunning = new Dunning($db);
+		$levels = array();
+		foreach ($days as $nbdays) {
+			$level = array_merge(array('rowid' => 0, 'label' => 'DUNNINGTEST '.$nbdays, 'nbdays' => $nbdays, 'fk_c_type_contact' => 0, 'percustomer' => 0, 'fk_email_template' => $template, 'active' => 1), $values);
+			$levels[$nbdays] = $dunning->saveLevel($this->savuser, $level);
+			$this->assertGreaterThan(0, $levels[$nbdays], (string) $dunning->error);
+		}
+
+		return $levels;
+	}
+
+	/**
+	 * Create a customer
+	 *
+	 * @param	string	$email	Email
+	 * @param	string	$lang	Language
+	 * @return	int				Id
+	 */
+	private function createCustomer($email, $lang = '')
+	{
+		$soc = new Societe($this->savdb);
+		$soc->name = 'DUNNINGTEST '.$email;
+		$soc->email = $email;
+		$soc->default_lang = $lang;
+		$soc->client = 1;
+		$soc->code_client = -1;
+		$this->assertGreaterThanOrEqual(0, $soc->create($this->savuser), (string) $soc->error);
+
+		return $soc->id;
+	}
+
+	/**
+	 * Create a validated unpaid invoice of 120
+	 *
+	 * @param	int		$socid		Customer
+	 * @param	int		$days		Days from today to the due date
+	 * @param	string	$set		More SQL to set
+	 * @param	int		$now		Date of today, now if 0
+	 * @return	int					Id
+	 */
+	private function createInvoice($socid, $days, $set = '', $now = 0)
+	{
+		$db = $this->savdb;
+		$now = ($now ?: dol_now());
+		$invoice = new Facture($db);
+		$invoice->socid = $socid;
+		$invoice->date = $now;
+		$invoice->cond_reglement_id = 1;
+		$this->assertGreaterThan(0, $invoice->create($this->savuser), (string) $invoice->error);
+		$this->assertGreaterThan(0, $invoice->addline('Test', 100, 1, 20));
+		$duedate = dol_time_plus_duree(dol_get_first_hour($now), $days, 'd', 0, 'tzserver');
+		$sql = "UPDATE ".$db->prefix()."facture SET fk_statut = ".Facture::STATUS_VALIDATED.", paye = 0, date_lim_reglement = '".$db->idate($duedate)."'";
+		$this->assertTrue((bool) $db->query($sql." WHERE rowid = ".((int) $invoice->id)), (string) $db->lasterror());
+		if ($set) {	// Separate statement: PostgreSQL refuses two assignments of one column (fk_statut of a draft)
+			$this->assertTrue((bool) $db->query("UPDATE ".$db->prefix()."facture SET ".$set." WHERE rowid = ".((int) $invoice->id)), (string) $db->lasterror());
+		}
+
+		return $invoice->id;
+	}
+
+	/**
+	 * Record the event of a level sent, as the sending does
+	 *
+	 * @param	int		$id			Invoice
+	 * @param	int		$socid		Customer
+	 * @param	int		$levelid	Level
+	 * @param	int		$datep		Date of the sending
+	 * @return	void
+	 */
+	private function addSentEvent($id, $socid, $levelid, $datep)
+	{
+		$event = new ActionComm($this->savdb);
+		$event->type_code = 'AC_OTH_AUTO';
+		$event->code = Dunning::CODE_PREFIX.$levelid.Dunning::CODE_SENT_SUFFIX;
+		$event->label = 'DUNNINGTEST';
+		$event->socid = $socid;
+		$event->elementtype = 'invoice';
+		$event->elementid = $id;
+		$event->datep = $datep;
+		$event->datef = $datep;
+		$event->percentage = -1;
+		$event->authorid = $this->savuser->id;
+		$event->userownerid = $this->savuser->id;
+		$this->assertGreaterThan(0, $event->create($this->savuser), (string) $event->error);
+	}
+
+	/**
+	 * Record a payment of an invoice, by SQL: Paiement::create() also writes the PDF of the invoice and runs the triggers
+	 *
+	 * @param	int		$id			Invoice
+	 * @param	float	$amount		Amount paid
+	 * @return	void
+	 */
+	private function addPayment($id, $amount)
+	{
+		$db = $this->savdb;
+		$sql = "INSERT INTO ".$db->prefix()."paiement (entity, ref, datec, datep, amount, fk_paiement) VALUES (1, 'DUNNINGTEST', '".$db->idate(dol_now())."', '".$db->idate(dol_now())."', ".((float) $amount).", ".((int) dol_getIdFromCode($db, 'LIQ', 'c_paiement', 'code', 'id', 1)).")";
+		$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+		$payment = $db->last_insert_id($db->prefix().'paiement');
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."paiement_facture (fk_facture, fk_paiement, amount) VALUES (".((int) $id).", ".((int) $payment).", ".((float) $amount).")"), (string) $db->lasterror());
+	}
+}

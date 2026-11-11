@@ -15,6 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+declare(strict_types=1);
+
 /**
  * \file    dunning/class/dunning.class.php
  * \ingroup dunning
@@ -28,6 +30,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/lib/payments.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
 require_once DOL_DOCUMENT_ROOT.'/categories/class/categorie.class.php';
+require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
 require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
 require_once DOL_DOCUMENT_ROOT.'/cron/class/cronjob.class.php';
 require_once DOL_DOCUMENT_ROOT.'/core/class/html.formmail.class.php';
@@ -54,6 +57,11 @@ class Dunning
 	 * Code of the event of a payment promise
 	 */
 	const CODE_PROMISE = 'AC_DUNNING_PROMISE';
+
+	/**
+	 * Code of the event recorded on an invoice when its penalty invoice is created, with the id of the penalty invoice in its extraparams
+	 */
+	const CODE_PENALTY_INVOICE = 'AC_DUNNING_PENALTYINV';
 
 	/**
 	 * @var DoliDB Database handler
@@ -263,7 +271,12 @@ class Dunning
 		// Amounts paid, credit notes and deposits used, like Societe::getOutstandingBills()
 		$sql = "SELECT f.rowid, f.ref, f.type, f.fk_soc, f.fk_projet, COALESCE(f.date_lim_reglement, f.datef) as refdate, f.total_ttc, f.last_main_doc,";
 		$sql .= " f.retained_warranty, f.retained_warranty_date_limit,";
-		$sql .= " s.nom as socname, s.email, s.default_lang,";
+		$sql .= " s.nom as socname, s.email, s.default_lang, s.tva_intra, s.siren, s.siret, s.ape, s.idprof4, s.idprof5, s.idprof6, s.euid, te.code as typent_code,";
+		if (getDolGlobalInt('DUNNING_NOPENALTY_CATEGORY') > 0) {	// Customers who never pay penalties
+			$sql .= " (SELECT COUNT(cs.fk_soc) FROM ".$this->db->prefix()."categorie_societe as cs WHERE cs.fk_soc = f.fk_soc AND cs.fk_categorie = ".getDolGlobalInt('DUNNING_NOPENALTY_CATEGORY').") as nopenalty,";
+		} else {
+			$sql .= " 0 as nopenalty,";
+		}
 		$sql .= " (SELECT SUM(pf.amount) FROM ".$this->db->prefix()."paiement_facture as pf WHERE pf.fk_facture = f.rowid) as paid,";
 		$sql .= " (SELECT SUM(rc.amount_ttc) FROM ".$this->db->prefix()."societe_remise_except as rc, ".$this->db->prefix()."facture as fs";
 		$sql .= " WHERE rc.fk_facture_source = fs.rowid AND rc.fk_facture = f.rowid AND fs.type IN (".$this->db->sanitize(Facture::TYPE_STANDARD.", ".Facture::TYPE_CREDIT_NOTE.", ".Facture::TYPE_SITUATION).")) as creditnotes,";
@@ -271,6 +284,7 @@ class Dunning
 		$sql .= " WHERE rc.fk_facture_source = fs.rowid AND rc.fk_facture = f.rowid AND fs.type = ".((int) Facture::TYPE_DEPOSIT).") as deposits";
 		$sql .= " FROM ".$this->db->prefix()."facture as f";
 		$sql .= " INNER JOIN ".$this->db->prefix()."societe as s ON s.rowid = f.fk_soc";
+		$sql .= " LEFT JOIN ".$this->db->prefix()."c_typent as te ON te.id = s.fk_typent";
 		$sql .= " WHERE f.entity IN (".getEntity('invoice', 0).")";	// One entity per run, like the reminder job of the core
 		$sql .= " AND f.fk_statut = ".((int) Facture::STATUS_VALIDATED)." AND f.paye = 0";
 		$sql .= " AND f.type IN (".$this->db->sanitize(Facture::TYPE_STANDARD.", ".Facture::TYPE_REPLACEMENT.", ".Facture::TYPE_DEPOSIT.", ".Facture::TYPE_SITUATION).")";
@@ -315,7 +329,8 @@ class Dunning
 			if ($remain > 0) {
 				$rows[(int) $obj->rowid] = array('id' => (int) $obj->rowid, 'ref' => $obj->ref, 'socid' => (int) $obj->fk_soc, 'socname' => $obj->socname,
 					'email' => (string) $obj->email, 'default_lang' => (string) $obj->default_lang, 'fk_projet' => (int) $obj->fk_projet,
-					'last_main_doc' => (string) $obj->last_main_doc, 'refdate' => $refdate, 'total_ttc' => (float) $obj->total_ttc, 'paid' => $paid, 'remain' => $remain);
+					'last_main_doc' => (string) $obj->last_main_doc, 'refdate' => $refdate, 'total_ttc' => (float) $obj->total_ttc, 'paid' => $paid, 'remain' => $remain,
+					'penaltysubject' => (!$obj->nopenalty && $this->isACompany($obj)), 'penaltyinvoice' => 0);
 			}
 		}
 		if (empty($rows)) {
@@ -332,6 +347,8 @@ class Dunning
 			$reg = array();
 			if ($event->code == self::CODE_PROMISE) {
 				$promise[$event->fk_element] = $event->datep;
+			} elseif ($event->code == self::CODE_PENALTY_INVOICE) {
+				$rows[$event->fk_element]['penaltyinvoice'] = (int) (json_decode((string) $event->extraparams, true)['invoice'] ?? 0);
 			} elseif (preg_match('/^'.self::CODE_PREFIX.'(\d+)'.self::CODE_SENT_SUFFIX.'$/', $event->code, $reg)) {
 				$sent[$event->fk_element][(int) $reg[1]] = $event->datep;
 			}
@@ -443,7 +460,7 @@ class Dunning
 		if (empty($invoiceids)) {
 			return array();
 		}
-		$sql = "SELECT a.id, a.fk_element, a.code, a.label, a.datep, a.email_to";
+		$sql = "SELECT a.id, a.fk_element, a.code, a.label, a.datep, a.email_to, a.extraparams";
 		$sql .= " FROM ".$this->db->prefix()."actioncomm as a";
 		$sql .= " WHERE a.entity IN (".getEntity('agenda').") AND a.elementtype = 'invoice'";
 		$sql .= " AND a.fk_element IN (".$this->db->sanitize(implode(',', array_map('intval', $invoiceids))).")";
@@ -557,24 +574,48 @@ class Dunning
 
 		$total = 0;
 		$late = 0;
-		$table = '<table border="1" cellpadding="4" style="border-collapse: collapse"><tr><th>'.$outputlangs->trans('Ref').'</th><th>'.$outputlangs->trans('DateDue').'</th>';
-		$table .= '<th>'.$outputlangs->trans('Late').'</th><th>'.$outputlangs->trans('AmountTTC').'</th><th>'.$outputlangs->trans('AlreadyPaid').'</th><th>'.$outputlangs->trans('RemainderToPay').'</th></tr>';
-		foreach ($group as $row) {
+		$penalties = 0;
+		$indemnity = 0;
+		$amounts = array();
+		foreach ($group as $key => $row) {
+			$amounts[$key] = $this->getPenalties($row, $now);
 			$total += $row->remain;
-			$late = max($late, $this->daysLate($row->refdate, $now));
+			$late = max($late, $amounts[$key]['days']);
+			$penalties += $amounts[$key]['penalties'];
+			$indemnity += $amounts[$key]['indemnity'];
+		}
+		$withpenalties = ($penalties + $indemnity > 0);	// A column only when something is due
+		$table = '<table border="1" cellpadding="4" style="border-collapse: collapse"><tr><th>'.$outputlangs->trans('Ref').'</th><th>'.$outputlangs->trans('DateDue').'</th>';
+		$table .= '<th>'.$outputlangs->trans('Late').'</th><th>'.$outputlangs->trans('AmountTTC').'</th><th>'.$outputlangs->trans('AlreadyPaid').'</th><th>'.$outputlangs->trans('RemainderToPay').'</th>';
+		$table .= ($withpenalties ? '<th>'.$outputlangs->trans('DunningPenalties').'</th>' : '').'</tr>';
+		foreach ($group as $key => $row) {
 			$table .= '<tr><td><a href="'.dolPrintHTMLForAttributeUrl(getOnlinePaymentUrl(0, 'invoice', $row->ref)).'">'.dolPrintLabel($row->ref).'</a></td>';
-			$table .= '<td>'.dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs).'</td><td style="text-align: right">'.$this->daysLate($row->refdate, $now).'</td>';
+			$table .= '<td>'.dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs).'</td><td style="text-align: right">'.$amounts[$key]['days'].'</td>';
 			$table .= '<td style="text-align: right">'.price($row->total_ttc, 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>';
 			$table .= '<td style="text-align: right">'.price($row->paid, 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>';	// Payments, credit notes and deposits used
-			$table .= '<td style="text-align: right">'.price($row->remain, 0, $outputlangs, 1, -1, -1, $conf->currency).'</td></tr>';
+			$table .= '<td style="text-align: right">'.price($row->remain, 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>';
+			$table .= ($withpenalties ? '<td style="text-align: right">'.price($amounts[$key]['penalties'] + $amounts[$key]['indemnity'], 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>' : '').'</tr>';
 		}
 		$formatted = price($total, 0, $outputlangs, 1, -1, -1, $conf->currency);
+		$withall = price($total + $penalties + $indemnity, 0, $outputlangs, 1, -1, -1, $conf->currency);
+		$parts = array();
+		if ($penalties > 0) {
+			$parts[] = $outputlangs->transnoentitiesnoconv('DunningPenaltiesTextPenalties', price($penalties, 0, $outputlangs, 1, -1, -1, $conf->currency), price($this->getSetupNumber('DUNNING_PENALTY_RATE'), 0, $outputlangs));
+		}
+		if ($indemnity > 0) {
+			$parts[] = $outputlangs->transnoentitiesnoconv('DunningPenaltiesTextIndemnity', price($indemnity, 0, $outputlangs, 1, -1, -1, $conf->currency));
+		}
+		$text = ($parts ? $outputlangs->transnoentitiesnoconv($penalties > 0 ? 'DunningPenaltiesText' : 'DunningPenaltiesTextOne', implode(' '.$outputlangs->transnoentitiesnoconv('and').' ', $parts), $withall) : '');
 
 		return array(
 			'__DUNNING_LEVEL__' => $level->label,
 			'__DUNNING_DAYS_LATE__' => (string) $late,
 			'__DUNNING_INVOICES__' => $table.'</table>',
 			'__DUNNING_TOTAL_REMAIN__' => $formatted,
+			'__DUNNING_PENALTIES__' => price($penalties, 0, $outputlangs, 1, -1, -1, $conf->currency),
+			'__DUNNING_INDEMNITY__' => price($indemnity, 0, $outputlangs, 1, -1, -1, $conf->currency),
+			'__DUNNING_TOTAL_WITH_PENALTIES__' => $withall,
+			'__DUNNING_PENALTIES_TEXT__' => $text,
 			'__AMOUNT_REMAIN__' => (string) price2num($total, 'MT'),
 			'__AMOUNT_REMAIN_FORMATTED__' => $formatted,
 			'__AMOUNT_REMAIN_FORMATED__' => $formatted,	// Old spelling kept by the core
@@ -610,6 +651,56 @@ class Dunning
 		}
 
 		return (float) $invoice->getRetainedWarrantyAmount();
+	}
+
+	/**
+	 * Tell if the customer of an invoice is a company, by the rules of the core (Societe::isACompany()): only companies owe late penalties
+	 *
+	 * @param	stdClass	$obj	Invoice as read by getInvoices(): typent_code, tva_intra and the professional ids of the customer
+	 * @return	bool				True if a company
+	 */
+	private function isACompany(stdClass $obj)
+	{
+		$soc = new Societe($this->db);
+		$soc->typent_code = (string) $obj->typent_code;
+		$soc->tva_intra = (string) $obj->tva_intra;
+		$soc->euid = (string) $obj->euid;
+		foreach (array('idprof1' => 'siren', 'idprof2' => 'siret', 'idprof3' => 'ape', 'idprof4' => 'idprof4', 'idprof5' => 'idprof5', 'idprof6' => 'idprof6') as $property => $field) {
+			$soc->$property = (string) $obj->$field;
+		}
+
+		return $soc->isACompany() > 0;
+	}
+
+	/**
+	 * Late penalties and fixed recovery indemnity of an invoice at a date, between companies (article L441-10 of the French commercial code):
+	 * rest to pay x annual rate x days late / 365, and the indemnity once per late invoice. Nothing if the rates are not set up.
+	 *
+	 * @param	stdClass	$row	Invoice as returned by getInvoices()
+	 * @param	int			$now	Date of the computation
+	 * @return	array{days:int,penalties:float,indemnity:float}	Days late, penalties and indemnity
+	 */
+	public function getPenalties(stdClass $row, $now)
+	{
+		$days = $this->daysLate($row->refdate, $now);
+		$result = array('days' => $days, 'penalties' => 0.0, 'indemnity' => 0.0);
+		if ($days > 0 && $row->penaltysubject) {
+			$result['penalties'] = (float) price2num($row->remain * $this->getSetupNumber('DUNNING_PENALTY_RATE') / 100 * $days / 365, 'MT');
+			$result['indemnity'] = (float) price2num($this->getSetupNumber('DUNNING_FIXED_INDEMNITY'), 'MT');
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Number of the setup typed with a comma or a dot as decimal separator: read the same whatever the language of the reader (a job, a user)
+	 *
+	 * @param	string	$name	Name of the constant
+	 * @return	float			Value, 0 if empty
+	 */
+	private function getSetupNumber($name)
+	{
+		return (float) str_replace(array(' ', ','), array('', '.'), getDolGlobalString($name));
 	}
 
 	/**
@@ -741,7 +832,7 @@ class Dunning
 		if ($first->default_lang) {
 			$outputlangs = new Translate('', $conf);
 			$outputlangs->setDefaultLang($first->default_lang);
-			$outputlangs->loadLangs(array('main', 'bills'));
+			$outputlangs->loadLangs(array('main', 'bills', 'dunning@dunning'));
 		}
 
 		$tpl = $this->getTemplate($level, $outputlangs, $user);
@@ -944,6 +1035,189 @@ class Dunning
 		}
 
 		return count($socids);
+	}
+
+	/**
+	 * Create a draft invoice of the late penalties and the recovery indemnity of an invoice, once: an event on the invoice keeps its id.
+	 * The invoice of origin is not changed (a validated invoice can not be), the user checks and validates the new one.
+	 *
+	 * @param	User		$user	User creating
+	 * @param	stdClass	$row	Invoice as returned by getInvoices()
+	 * @return	int					Id of the penalty invoice, <0 if KO
+	 */
+	public function createPenaltyInvoice(User $user, stdClass $row)
+	{
+		global $langs;
+
+		$langs->loadLangs(array('bills', 'dunning@dunning'));
+		if (!$user->hasRight('dunning', 'write') || !$user->hasRight('facture', 'creer')) {
+			$this->error = $langs->trans('NotEnoughPermissions');
+			return -1;
+		}
+		$now = dol_now();
+		$amounts = $this->getPenalties($row, $now);
+		if ($row->penaltyinvoice || $amounts['penalties'] + $amounts['indemnity'] <= 0) {
+			$this->error = $langs->trans($row->penaltyinvoice ? 'DunningPenaltyInvoiceExists' : 'DunningNoPenalty');
+			return -1;
+		}
+
+		$this->db->begin();
+		$invoice = new Facture($this->db);
+		$invoice->socid = $row->socid;
+		$invoice->date = $now;
+		$invoice->fk_project = $row->fk_projet;
+		$invoice->linked_objects = array('facture' => $row->id);
+		$id = $invoice->create($user);
+		$lines = array(
+			array($langs->transnoentities('DunningPenaltyLine', $row->ref, $amounts['days'], price($this->getSetupNumber('DUNNING_PENALTY_RATE'))), $amounts['penalties']),
+			array($langs->transnoentities('DunningIndemnityLine', $row->ref), $amounts['indemnity']),
+		);
+		foreach ($lines as $line) {	// Service lines without VAT: late penalties and recovery indemnity are out of its scope
+			if ($id > 0 && $line[1] > 0 && $invoice->addline($line[0], $line[1], 1, 0, 0, 0, 0, 0, '', '', 0, 0, 0, 'HT', 0, 1) < 0) {
+				$id = -1;
+			}
+		}
+		if ($id > 0) {
+			$event = new ActionComm($this->db);
+			$event->type_code = 'AC_OTH_AUTO';
+			$event->code = self::CODE_PENALTY_INVOICE;
+			$event->label = $langs->transnoentities('DunningPenaltyInvoiceEvent', $invoice->ref);
+			$event->extraparams = array('invoice' => (string) $id);
+			$event->socid = $row->socid;
+			$event->elementtype = 'invoice';
+			$event->elementid = $row->id;
+			$event->datep = $now;
+			$event->datef = $now;
+			$event->percentage = -1;
+			$event->authorid = $user->id;
+			$event->userownerid = $user->id;
+			$id = ($event->create($user) > 0 ? $id : -1);
+		}
+		if ($id <= 0) {
+			$this->error = ($invoice->error ?: $this->db->lasterror());
+			$this->db->rollback();
+			return -1;
+		}
+		$this->db->commit();
+
+		return $id;
+	}
+
+	/**
+	 * Email templates of the module, French and English versions with the same label: the module sends the version in the language of the customer
+	 *
+	 * @return array<array{0:string,1:string,2:int,3:string,4:string}>	Label, language, position, topic and content of each template
+	 */
+	private function getDefaultTemplates()
+	{
+		return array(
+			array('Relances - 1 Courtoisie / Courtesy', 'fr_FR', 10, 'Rappel : facture(s) bientôt à échéance',
+				'Bonjour,<br><br>Pour rappel, la ou les factures suivantes arrivent bientôt à échéance :<br>__DUNNING_INVOICES__<br>Total restant à payer : __DUNNING_TOTAL_REMAIN__. Vous pouvez régler en ligne depuis les liens du tableau.<br><br>Si votre règlement est déjà parti, merci de ne pas tenir compte de ce message.<br><br>Cordialement,<br>__MYCOMPANY_NAME__'),
+			array('Relances - 1 Courtoisie / Courtesy', 'en_US', 10, 'Reminder: invoice(s) due soon',
+				'Hello,<br><br>As a reminder, the following invoice(s) will soon be due:<br>__DUNNING_INVOICES__<br>Total remaining to pay: __DUNNING_TOTAL_REMAIN__. You can pay online from the links of the table.<br><br>If you have already paid, please ignore this message.<br><br>Best regards,<br>__MYCOMPANY_NAME__'),
+			array('Relances - 2 Relance / Reminder', 'fr_FR', 20, 'Relance : factures impayées (__DUNNING_TOTAL_REMAIN__)',
+				'Bonjour,<br><br>Sauf erreur de notre part, les factures suivantes restent impayées à ce jour :<br>__DUNNING_INVOICES__<br>Total restant dû : __DUNNING_TOTAL_REMAIN__.<br><br>Merci de procéder à leur règlement dans les meilleurs délais, ou de nous indiquer la date à laquelle il interviendra. Si votre règlement est déjà parti, merci de ne pas tenir compte de ce message.<br>__DUNNING_PENALTIES_TEXT__<br><br>Cordialement,<br>__MYCOMPANY_NAME__'),
+			array('Relances - 2 Relance / Reminder', 'en_US', 20, 'Reminder: unpaid invoices (__DUNNING_TOTAL_REMAIN__)',
+				'Hello,<br><br>Unless we are mistaken, the following invoices are still unpaid:<br>__DUNNING_INVOICES__<br>Total remaining due: __DUNNING_TOTAL_REMAIN__.<br><br>Please pay them as soon as possible, or let us know when you will. If you have already paid, please ignore this message.<br>__DUNNING_PENALTIES_TEXT__<br><br>Best regards,<br>__MYCOMPANY_NAME__'),
+			array('Relances - 3 Mise en demeure / Formal notice', 'fr_FR', 30, 'Mise en demeure de payer : __DUNNING_TOTAL_REMAIN__',
+				'Madame, Monsieur,<br><br>Malgré nos précédentes relances, les factures suivantes restent impayées :<br>__DUNNING_INVOICES__<br>Total restant dû : __DUNNING_TOTAL_REMAIN__.<br>__DUNNING_PENALTIES_TEXT__<br><br>Par la présente, nous vous mettons en demeure de régler cette somme sous huit jours. À défaut, nous serons contraints d\'engager une procédure de recouvrement.<br><br>Veuillez agréer, Madame, Monsieur, nos salutations distinguées.<br>__MYCOMPANY_NAME__'),
+			array('Relances - 3 Mise en demeure / Formal notice', 'en_US', 30, 'Formal notice to pay: __DUNNING_TOTAL_REMAIN__',
+				'Dear Sir or Madam,<br><br>Despite our previous reminders, the following invoices are still unpaid:<br>__DUNNING_INVOICES__<br>Total remaining due: __DUNNING_TOTAL_REMAIN__.<br>__DUNNING_PENALTIES_TEXT__<br><br>We hereby give you formal notice to pay this amount within eight days. Failing that, we will have to start a debt recovery procedure.<br><br>Yours faithfully,<br>__MYCOMPANY_NAME__'),
+		);
+	}
+
+	/**
+	 * Create the email templates of the module that are not there yet, at each activation: a template already there is kept as the user changed it.
+	 * Checked by a query first, not by the error of the unique key (entity, label, lang), which PostgreSQL reports too late inside a transaction.
+	 *
+	 * @return	int		Number of templates created, <0 if KO
+	 */
+	public function initTemplates()
+	{
+		global $conf;
+
+		$sql = "SELECT label, lang FROM ".$this->db->prefix()."c_email_templates WHERE entity = ".((int) $conf->entity);
+		$sql .= " AND label LIKE '".$this->db->escape($this->db->escapeforlike('Relances - '))."%'";
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+		$existing = array();
+		while ($obj = $this->db->fetch_object($resql)) {
+			$existing[$obj->label.'|'.$obj->lang] = 1;
+		}
+		$nb = 0;
+		foreach ($this->getDefaultTemplates() as $template) {	// Bounded by the 6 templates of the module
+			if (isset($existing[$template[0].'|'.$template[1]])) {
+				continue;
+			}
+			$sql = "INSERT INTO ".$this->db->prefix()."c_email_templates (entity, module, type_template, lang, private, label, position, enabled, active, topic, joinfiles, content)";
+			$sql .= " VALUES (".((int) $conf->entity).", 'dunning', 'facture_send', '".$this->db->escape($template[1])."', 0, '".$this->db->escape($template[0])."', ".((int) $template[2]);
+			$sql .= ", '1', 1, '".$this->db->escape($template[3])."', 1, '".$this->db->escape($template[4])."')";
+			if (!$this->db->query($sql)) {
+				$this->error = $this->db->lasterror();
+				return -1;
+			}
+			$nb++;
+		}
+
+		return $nb;
+	}
+
+	/**
+	 * Create the default levels on the first activation of the module, with the email templates of initTemplates(): nothing if a level exists
+	 *
+	 * @param	User	$user	Administrator enabling the module
+	 * @return	int				Number of levels created, <0 if KO
+	 */
+	public function initDefaultLevels(User $user)
+	{
+		global $conf, $langs;
+
+		$levels = $this->fetchLevels();
+		if (!is_array($levels)) {
+			return -1;
+		}
+		if (!empty($levels) || !$user->admin) {
+			return 0;
+		}
+		$langs->load('dunning@dunning');
+		$lang = (strpos((string) $langs->defaultlang, 'fr') === 0 ? 'fr_FR' : 'en_US');
+		$sql = "SELECT t.rowid, t.label, (SELECT ct.rowid FROM ".$this->db->prefix()."c_type_contact as ct";
+		$sql .= " WHERE ct.element = 'facture' AND ct.source = 'external' AND ct.code = 'BILLING' AND ct.active = 1) as billing";
+		$sql .= " FROM ".$this->db->prefix()."c_email_templates as t";
+		$sql .= " WHERE t.entity = ".((int) $conf->entity)." AND t.module = 'dunning' AND t.lang = '".$this->db->escape($lang)."'";
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+		$templates = array();
+		$billing = 0;
+		while ($obj = $this->db->fetch_object($resql)) {
+			$templates[$obj->label] = (int) $obj->rowid;
+			$billing = (int) $obj->billing;
+		}
+		$defaults = array(
+			array('Relances - 1 Courtoisie / Courtesy', -3, 'DunningDefaultLevelCourtesy', 0, 0),
+			array('Relances - 2 Relance / Reminder', 15, 'DunningDefaultLevelReminder', 1, 0),
+			array('Relances - 3 Mise en demeure / Formal notice', 30, 'DunningDefaultLevelNotice', 1, 1),
+		);
+		$nb = 0;
+		foreach ($defaults as $default) {
+			if (empty($templates[$default[0]])) {	// Template deleted by the user
+				continue;
+			}
+			$level = array('rowid' => 0, 'label' => $langs->transnoentitiesnoconv($default[2]), 'nbdays' => $default[1], 'fk_c_type_contact' => $billing,
+				'percustomer' => $default[3], 'byhand' => $default[4], 'fk_email_template' => $templates[$default[0]], 'active' => 1);
+			if ($this->saveLevel($user, $level) < 0) {
+				return -1;
+			}
+			$nb++;
+		}
+
+		return $nb;
 	}
 
 	/**
