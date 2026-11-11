@@ -190,9 +190,12 @@ class Dunning
 			foreach ($values as $field => $value) {
 				$sets[] = $field." = ".$value;
 			}
+			// @phan-suppress-next-line SqlInjection	(values cast or escaped above)
 			$sql = "UPDATE ".$this->db->prefix()."dunning_level SET ".implode(', ', $sets)." WHERE rowid = ".((int) $level['rowid'])." AND entity = ".((int) $conf->entity);
 		} else {
+			// @phan-suppress-next-line SqlInjection	(fields written above)
 			$sql = "INSERT INTO ".$this->db->prefix()."dunning_level (entity, ".implode(', ', array_keys($values)).")";
+			// @phan-suppress-next-line SqlInjection	(values cast or escaped above)
 			$sql .= " VALUES (".((int) $conf->entity).", ".implode(', ', $values).")";
 		}
 		if (!$this->db->query($sql)) {
@@ -350,7 +353,7 @@ class Dunning
 				$rows[(int) $obj->rowid] = array('id' => (int) $obj->rowid, 'ref' => $obj->ref, 'socid' => (int) $obj->fk_soc, 'socname' => $obj->socname,
 					'email' => (string) $obj->email, 'default_lang' => (string) $obj->default_lang, 'fk_projet' => (int) $obj->fk_projet,
 					'last_main_doc' => (string) $obj->last_main_doc, 'refdate' => $refdate, 'total_ttc' => (float) $obj->total_ttc, 'paid' => $paid, 'remain' => $remain,
-					'penaltysubject' => (!$obj->nopenalty && ($companies[$obj->fk_soc] = ($companies[$obj->fk_soc] ?? $this->isACompany($obj)))), 'penaltyinvoice' => 0,
+					'penaltysubject' => (!$obj->nopenalty && ($companies[$obj->fk_soc] ??= $this->isACompany($obj))), 'penaltyinvoice' => 0,
 					'currency' => $conf->currency, 'mc_rate' => 1.0, 'mc_total' => (float) $obj->total_ttc, 'mc_paid' => $paid, 'mc_remain' => $remain,
 					'installment' => '', 'installments' => array(), 'directdebit' => ((int) $obj->fk_mode_reglement == $this->getDirectDebitMode()));
 				if ($obj->multicurrency_code && $obj->multicurrency_code != $conf->currency && (float) $obj->multicurrency_tx > 0) {	// Amounts in the currency of the invoice
@@ -450,13 +453,12 @@ class Dunning
 	 * Invoices with a schedule of expected payments (module Echeances): reminded installment by installment. What is paid goes to the
 	 * installments by date, like in the module Echeances; the reference date is the oldest unpaid installment, the rest to pay the unpaid
 	 * part of the installments due (of the next one before its date), the late installments kept for the penalties.
+	 * An installment is known by its due date: the module Echeances writes its lines again at each change of the schedule.
+	 * If its tables can not be read, the invoices are reminded as a whole.
 	 *
 	 * @param	array<int,array<string,mixed>>	$rows		Invoices being read by getInvoices(), changed in place
 	 * @param	int								$today		First hour of the day of the reading
 	 * @param	int								$decimals	Decimals of the totals
-	 * An installment is known by its due date: the module Echeances writes its lines again at each change of the schedule.
-	 * If its tables can not be read, the invoices are reminded as a whole.
-	 *
 	 * @return	int											0 if OK, -1 if the schedules could not be read (logged)
 	 */
 	private function applyInstallments(array &$rows, $today, $decimals)
@@ -475,7 +477,7 @@ class Dunning
 		$left = array();
 		while ($obj = $this->db->fetch_object($resql)) {
 			$id = (int) $obj->fk_element;
-			$left[$id] = $left[$id] ?? $rows[$id]['paid'];
+			$left[$id] ??= $rows[$id]['paid'];
 			$paid = min((float) $obj->amount, max(0.0, $left[$id]));
 			$left[$id] -= $paid;
 			if (round((float) $obj->amount - $paid, $decimals) > 0) {
@@ -1227,7 +1229,9 @@ class Dunning
 			dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningnotice.modules.php');
 			dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningstatement.modules.php');
 			$notice = ($level->joinnotice == 2 ? new pdf_dunningstatement($this->db) : new pdf_dunningnotice($this->db));
-			if ($notice->write_file($invoice->thirdparty, $outputlangs) <= 0) {
+			$thirdparty = $invoice->thirdparty;
+			'@phan-var-force Societe $thirdparty';
+			if ($notice->write_file($thirdparty, $outputlangs) <= 0) {
 				$this->errors[] = $refs.': '.$notice->error;
 				return 0;
 			}
@@ -1418,7 +1422,7 @@ class Dunning
 		$invoice->linked_objects = array('facture' => $row->id);
 		$id = $invoice->create($user);
 		$lines = array(
-			array($langs->transnoentities('DunningPenaltyLine', $row->ref, $amounts['days'], price($this->getSetupNumber('DUNNING_PENALTY_RATE'))), $amounts['penalties']),
+			array($langs->transnoentities('DunningPenaltyLine', $row->ref, (string) $amounts['days'], price($this->getSetupNumber('DUNNING_PENALTY_RATE'))), $amounts['penalties']),
 			array($langs->transnoentities('DunningIndemnityLine', $row->ref), $amounts['indemnity']),
 		);
 		foreach ($lines as $line) {	// Service lines without VAT: late penalties and recovery indemnity are out of its scope
@@ -1595,7 +1599,7 @@ class Dunning
 		if (!$user->hasRight('societe', 'client', 'voir')) {	// Like getInvoices(): a sales representative only counts its customers
 			$where .= " AND EXISTS (SELECT sc.fk_soc FROM ".$this->db->prefix()."societe_commerciaux as sc WHERE sc.fk_soc = a.fk_soc AND sc.fk_user = ".((int) $user->id).")";
 		}
-		$where .= " AND a.code LIKE '".$this->db->escape($this->db->escapeforlike(self::CODE_PREFIX))."%".$this->db->escape($this->db->escapeforlike(self::CODE_SENT_SUFFIX))."'";
+		$where .= " AND a.code LIKE '".$this->db->escape($this->db->escapeforlike(self::CODE_PREFIX).'%'.$this->db->escapeforlike(self::CODE_SENT_SUFFIX))."'";
 		$where .= " AND a.datep >= '".$this->db->idate($from)."' AND a.datep <= '".$this->db->idate($to)."'";
 		$queries = array(
 			'reminders' => "SELECT a.fk_element as id, a.code, a.datep as date".$where." ORDER BY a.datep",
@@ -1624,10 +1628,10 @@ class Dunning
 			$key = dol_print_date($reminder->date, '%Y-%m', 'tzserver');
 			$reg = array();
 			$levelid = (preg_match('/^'.self::CODE_PREFIX.'(\d+)'.self::CODE_SENT_SUFFIX.'$/', $reminder->code, $reg) ? (int) $reg[1] : 0);
-			$result['months'][$key] = $result['months'][$key] ?? $month;
+			$result['months'][$key] ??= $month;
 			$result['months'][$key]['reminders']++;
 			$result['months'][$key]['invoices'] += (isset($byinvoice[$reminder->id]) ? 0 : 1);	// Counted in the month of its first reminder
-			$result['levels'][$levelid] = $result['levels'][$levelid] ?? array('label' => (isset($levels[$levelid]) ? $levels[$levelid]->label : (string) $levelid), 'reminders' => 0, 'paid30' => 0.0);
+			$result['levels'][$levelid] ??= array('label' => (isset($levels[$levelid]) ? $levels[$levelid]->label : (string) $levelid), 'reminders' => 0, 'paid30' => 0.0);
 			$result['levels'][$levelid]['reminders']++;
 			$byinvoice[$reminder->id][] = array($reminder->date, $key, $levelid);
 		}

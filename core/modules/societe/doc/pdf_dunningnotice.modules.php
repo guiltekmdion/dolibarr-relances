@@ -124,7 +124,7 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 		$pdf->Open();
 		$pdf->SetTitle($outputlangs->convToOutputCharset($outputlangs->transnoentities($prefix.'Subject')));
 		$pdf->SetCreator('Dolibarr '.DOL_VERSION);
-		$pdf->SetMargins($this->marge_gauche, $this->marge_haute, $this->marge_droite);
+		$pdf->SetMargins($this->marge_gauche, $this->marge_haute, $this->marge_droite);	// @phan-suppress-current-line PhanPluginSuspiciousParamOrder
 		$pdf->AddPage();
 		pdf_pagehead($pdf, $outputlangs, $this->page_hauteur);
 
@@ -151,7 +151,7 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 		$pdf->MultiCell(90, 5, pdfBuildThirdpartyName($object, $outputlangs), 0, 'L');
 		$pdf->SetX($posx);
 		$pdf->SetFont('', '', $fontsize - 1);
-		$pdf->MultiCell(90, 4, pdf_build_address($outputlangs, $mysoc, $object, '', 0, 'target'), 0, 'L');
+		$pdf->MultiCell(90, 4, pdf_build_address($outputlangs, $mysoc, $object, '', 0, 'target'), 0, 'L');	// @phan-suppress-current-line PhanPluginSuspiciousParamPosition
 
 		// Letter, with the table of the invoices of the reminders
 		$html = '<p style="text-align: right">'.dolPrintLabel(trim($mysoc->town.', '.dol_print_date($now, 'daytext', 'tzserver', $outputlangs), ', ')).'</p>';

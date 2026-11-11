@@ -577,8 +577,8 @@ class modDunning extends DolibarrModules
 
 		// The formal notice and the statement of account in the document models of the thirdparties
 		foreach (array('dunningnotice', 'dunningstatement') as $model) {
-			$sql[] = "DELETE FROM ".$this->db->prefix()."document_model WHERE nom = '".$model."' AND type = 'company' AND entity = ".((int) $conf->entity);
-			$sql[] = "INSERT INTO ".$this->db->prefix()."document_model (nom, type, entity) VALUES ('".$model."', 'company', ".((int) $conf->entity).")";
+			$sql[] = "DELETE FROM ".$this->db->prefix()."document_model WHERE nom = '".$this->db->escape($model)."' AND type = 'company' AND entity = ".((int) $conf->entity);
+			$sql[] = "INSERT INTO ".$this->db->prefix()."document_model (nom, type, entity) VALUES ('".$this->db->escape($model)."', 'company', ".((int) $conf->entity).")";
 		}
 
 		return $this->_init($sql, $options);
