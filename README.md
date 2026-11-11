@@ -17,6 +17,8 @@ The module sends reminder emails for the unpaid customer invoices, level after l
 - **Home page**: a line "Customers to remind" in the Invoices block, which opens the list filtered on them.
 - **Ready to use**: at the first activation, 3 email templates in French and English (courtesy, reminder, formal notice) and 3 levels (3 days before the due date, 15 days after with one email per customer, 30 days after by hand).
 - **Late penalties and recovery indemnity** (France, between companies): annual rate and fixed indemnity in the setup, computed for each late invoice, shown in the emails and on the tab of the invoice; a button prepares a separate draft invoice of them.
+- **Statistics** (Billing > Reminders > Statistics): reminders sent and invoices reminded by month and by level, amount paid within 30 days after a reminder, average days from the first reminder to the full payment.
+- **Foreign currencies**: the emails and the formal notice show the amounts in the currency of each invoice (payments in this currency), one email per customer and currency; the list adds the amounts in the currency of the company.
 - **Keys in the email templates editor**: the `__DUNNING_*__` keys appear in the list of keys of the templates editor, and get their values when an invoice is sent by hand from its card.
 
 ## Rules

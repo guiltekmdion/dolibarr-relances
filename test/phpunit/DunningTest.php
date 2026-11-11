@@ -176,7 +176,7 @@ class DunningTest extends CommonClassTest
 
 		$module = new modDunning($db);
 
-		$this->assertSame(array('1.2.0', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
+		$this->assertSame(array('1.3.0', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
 		$this->assertTrue((bool) $db->query("SELECT rowid FROM ".$db->prefix()."dunning_level"), 'Enabling the module creates its table: '.$db->lasterror());
 		$this->assertSame(0, $module->cronjobs[0]['status']);
 		$this->assertSame(array('DUNNING_START_DATE', 1), array($module->const[0][0], $module->const[0][6]), 'A module enabled again does not send the past');
@@ -1072,6 +1072,93 @@ class DunningTest extends CommonClassTest
 	}
 
 	/**
+	 * Invoices in a foreign currency: amounts of the emails in the currency of the invoice (payments in this currency), the list in the
+	 * currency of the company, one email per customer and currency, the penalties converted at the rate of the invoice
+	 *
+	 * @return void
+	 */
+	public function testDunningMulticurrency()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree(dol_now(), -30, 'd', 0, 'tzserver');
+		$this->createLevels(array(0), array('percustomer' => 1));
+		$socid = $this->createCustomer('usd@example.com');
+		$usd = $this->createInvoice($socid, -10, "multicurrency_code = 'USD', multicurrency_tx = 1.1, multicurrency_total_ttc = 132");
+		$eur = $this->createInvoice($socid, -10);
+		$this->addPayment($usd, 20, 22);
+		$dunning = new Dunning($db);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$row = $rows[$usd];
+		$this->assertSame(array('USD', 1.1, 132.0, 22.0, 110.0, 100.0), array($row->currency, $row->mc_rate, $row->mc_total, $row->mc_paid, $row->mc_remain, $row->remain), 'In dollars, and in euros for the list');
+		$this->assertSame(array($conf->currency, 120.0), array($rows[$eur]->currency, $rows[$eur]->mc_remain));
+		$customers = $dunning->getCustomers($this->savuser, dol_now());
+		$this->assertSame(220.0, $customers[$socid]['remain'], 'The list adds in the currency of the company');
+
+		$subst = $dunning->getSubstitutions(array($row, $rows[$eur]), (object) array('label' => 'DUNNINGTEST'), $langs, dol_now());
+		$this->assertSame(price(110, 0, $langs, 1, -1, 'MT', 'USD').' + '.price(120, 0, $langs, 1, -1, 'MT', $conf->currency), $subst['__DUNNING_TOTAL_REMAIN__'], 'A total by currency');
+		$this->assertStringContainsString(price(132, 0, $langs, 1, -1, -1, 'USD'), $subst['__DUNNING_INVOICES__']);
+		$conf->global->DUNNING_FIXED_INDEMNITY = '40';
+		$this->assertTrue((bool) $db->query("UPDATE ".$db->prefix()."societe SET tva_intra = 'FR00123456789' WHERE rowid = ".((int) $socid)));
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$subst = $dunning->getSubstitutions(array($rows[$usd]), (object) array('label' => 'DUNNINGTEST'), $langs, dol_now());
+		$this->assertSame(price(44, 0, $langs, 1, -1, 'MT', 'USD'), $subst['__DUNNING_INDEMNITY__'], '40 converted at the rate of the invoice');
+
+		$hook = $this->captureMails();
+		$this->assertSame(0, $dunning->sendReminders(), $dunning->error.implode(', ', $dunning->errors));
+		$this->assertCount(2, $hook->mails, 'One email per currency, with a level of one email per customer');
+	}
+
+	/**
+	 * Statistics: reminders and invoices reminded by month, payments within 30 days counted once for the last reminder before them,
+	 * days from the first reminder to the full payment
+	 *
+	 * @return void
+	 */
+	public function testDunningStatistics()
+	{
+		$db = $this->savdb;
+		$now = dol_now();
+		$day = 86400;
+		$levels = $this->createLevels(array(0, 10));
+		$socid = $this->createCustomer('stats@example.com');
+		$paid = $this->createInvoice($socid, -30);
+		$open = $this->createInvoice($socid, -30);
+		$this->addSentEvent($paid, $socid, $levels[0], $now - 20 * $day);
+		$this->addPayment($paid, 120, 0.0, $now - 15 * $day);	// 5 days after the reminder, the invoice is paid
+		$this->assertTrue((bool) $db->query("UPDATE ".$db->prefix()."facture SET paye = 1, date_closing = '".$db->idate($now - 15 * $day)."' WHERE rowid = ".((int) $paid)));
+		$this->addSentEvent($open, $socid, $levels[0], $now - 20 * $day);
+		$this->addSentEvent($open, $socid, $levels[10], $now - 10 * $day);
+		$this->addPayment($open, 30, 0.0, $now - 50 * $day);	// Before the reminders
+		$this->addPayment($open, 20, 0.0, $now - 2 * $day);	// For the last reminder
+		$this->addPayment($open, 5, 0.0, $now - 19 * $day + 3600);	// For the first reminder, the second one came later
+		$old = $this->createInvoice($socid, -60);
+		$this->addSentEvent($old, $socid, $levels[0], $now - 55 * $day);
+		$this->addPayment($old, 50, 0.0, $now - 5 * $day);	// 50 days after the reminder: not counted
+
+		$dunning = new Dunning($db);
+		$stats = $dunning->getStatistics($this->savuser, $now - 60 * $day, $now);
+		$sum = array('reminders' => 0, 'invoices' => 0, 'paid30' => 0.0);
+		$delays = array();
+		foreach ($stats['months'] as $month) {
+			foreach ($sum as $field => $value) {
+				$sum[$field] = $value + $month[$field];
+			}
+			if ($month['closed']) {
+				$delays[] = array($month['delay'], $month['closed']);
+			}
+		}
+		$this->assertSame(array('reminders' => 4, 'invoices' => 3, 'paid30' => 145.0), $sum);
+		$this->assertSame(array(array(5.0, 1)), $delays, 'Paid 5 days after the first reminder');
+		$this->assertSame(array(array('DUNNINGTEST 0', 3, 125.0), array('DUNNINGTEST 10', 1, 20.0)), array(array_values($stats['levels'][$levels[0]]), array_values($stats['levels'][$levels[10]])));
+		$this->assertSame(array('months' => array(), 'levels' => array()), $dunning->getStatistics($this->savuser, $now - 300 * $day, $now - 200 * $day), 'Nothing in the period');
+		$reader = clone $this->savuser;
+		$reader->rights = (object) array('dunning' => (object) array('read' => 1));
+		$this->assertSame(-1, $dunning->getStatistics($reader, $now - 60 * $day, $now), 'Reading invoices is needed');
+	}
+
+	/**
 	 * Rights: read, write, sales representative, external user, administrator for the levels, all customers for the job
 	 *
 	 * @return void
@@ -1406,14 +1493,17 @@ class DunningTest extends CommonClassTest
 	 *
 	 * @param	int		$id			Invoice
 	 * @param	float	$amount		Amount paid
+	 * @param	float	$mcamount	Amount paid in the currency of the invoice, the amount if 0
+	 * @param	int		$datep		Date of the payment, now if 0
 	 * @return	void
 	 */
-	private function addPayment($id, $amount)
+	private function addPayment($id, $amount, $mcamount = 0.0, $datep = 0)
 	{
 		$db = $this->savdb;
-		$sql = "INSERT INTO ".$db->prefix()."paiement (entity, ref, datec, datep, amount, fk_paiement) VALUES (1, 'DUNNINGTEST', '".$db->idate(dol_now())."', '".$db->idate(dol_now())."', ".((float) $amount).", ".((int) dol_getIdFromCode($db, 'LIQ', 'c_paiement', 'code', 'id', 1)).")";
+		$sql = "INSERT INTO ".$db->prefix()."paiement (entity, ref, datec, datep, amount, fk_paiement) VALUES (1, 'DUNNINGTEST', '".$db->idate(dol_now())."', '".$db->idate($datep ?: dol_now())."', ".((float) $amount).", ".((int) dol_getIdFromCode($db, 'LIQ', 'c_paiement', 'code', 'id', 1)).")";
 		$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
 		$payment = $db->last_insert_id($db->prefix().'paiement');
-		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."paiement_facture (fk_facture, fk_paiement, amount) VALUES (".((int) $id).", ".((int) $payment).", ".((float) $amount).")"), (string) $db->lasterror());
+		$sql = "INSERT INTO ".$db->prefix()."paiement_facture (fk_facture, fk_paiement, amount, multicurrency_amount) VALUES (".((int) $id).", ".((int) $payment).", ".((float) $amount).", ".((float) ($mcamount ?: $amount)).")";
+		$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
 	}
 }

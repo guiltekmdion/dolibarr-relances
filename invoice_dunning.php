@@ -157,7 +157,7 @@ if ($action == 'send' && $row && $row->due) {
 if ($action == 'promise' && $row) {
 	$formquestion = array(
 		array('type' => 'date', 'name' => 'promisedate', 'label' => $langs->trans('Date'), 'value' => dol_now()),
-		array('type' => 'text', 'name' => 'promiseamount', 'label' => $langs->trans('DunningPromiseAmount'), 'morecss' => 'width75'),
+		array('type' => 'text', 'name' => 'promiseamount', 'label' => $langs->trans('DunningPromiseAmount').' ('.$conf->currency.')', 'morecss' => 'width75'),
 		array('type' => 'text', 'name' => 'promisenote', 'label' => $langs->trans('Note')),
 	);
 	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('DunningPromise'), '', 'confirm_promise', $formquestion, 0, 1);

@@ -82,7 +82,7 @@ class modDunning extends DolibarrModules
 		$this->editor_squarred_logo = '';					// Must be image filename into the module/img directory followed with @modulename. Example: 'myimage.png@dunning'
 
 		// Possible values for version are: 'development', 'experimental', 'dolibarr', 'dolibarr_deprecated', 'experimental_deprecated' or a version string like 'x.y.z'
-		$this->version = '1.2.0';
+		$this->version = '1.3.0';
 		// Url to the file with your last numberversion of this module
 		//$this->url_last_version = 'http://www.example.com/versionmodule.txt';
 
@@ -364,6 +364,20 @@ class modDunning extends DolibarrModules
 			'perms' => '$user->hasRight("dunning", "read") && $user->hasRight("facture", "lire")',
 			'target' => '',
 			'user' => 0, // 0=Menu for internal users, 1=external users, 2=both
+		);
+		$this->menu[$r++] = array(
+			'fk_menu' => 'fk_mainmenu=billing,fk_leftmenu=dunning',
+			'type' => 'left',
+			'titre' => 'DunningStatistics',
+			'mainmenu' => 'billing',
+			'leftmenu' => 'dunning_stats',
+			'url' => '/dunning/stats.php',
+			'langs' => 'dunning@dunning',
+			'position' => 111,
+			'enabled' => 'isModEnabled("dunning") && isModEnabled("invoice")',
+			'perms' => '$user->hasRight("dunning", "read") && $user->hasRight("facture", "lire")',
+			'target' => '',
+			'user' => 0,
 		);
 		/* END MODULEBUILDER TOPMENU */
 

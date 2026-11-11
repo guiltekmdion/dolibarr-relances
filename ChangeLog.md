@@ -1,5 +1,11 @@
 # CHANGELOG MODULE DUNNING FOR [DOLIBARR ERP CRM](https://www.dolibarr.org)
 
+## 1.3.0
+
+- Statistics of the reminders: by month and by level, amount paid within 30 days after a reminder, average days from the first reminder to the full payment.
+- Invoices in a foreign currency: amounts of the emails and of the formal notice in the currency of the invoice, one email per customer and currency, penalties converted at the rate of the invoice.
+- Faster list and line of the home page: 306 ms instead of 732 ms with 10,000 more unpaid invoices.
+
 ## 1.2.0
 
 - Payment promise with an amount, shown kept, pending or not kept according to the payments received since the promise.

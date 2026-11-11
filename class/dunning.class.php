@@ -249,7 +249,7 @@ class Dunning
 	 */
 	public function getInvoices(User $user, $now, array $socids = array(), $saleid = 0, $invoiceid = 0)
 	{
-		global $langs;
+		global $conf, $langs;
 
 		if (!$user->hasRight('dunning', 'read') || !$user->hasRight('facture', 'lire') || $user->socid > 0) {
 			$this->error = $langs->trans('NotEnoughPermissions');
@@ -271,6 +271,7 @@ class Dunning
 
 		// Amounts paid, credit notes and deposits used, like Societe::getOutstandingBills()
 		$sql = "SELECT f.rowid, f.ref, f.type, f.fk_soc, f.fk_projet, COALESCE(f.date_lim_reglement, f.datef) as refdate, f.total_ttc, f.last_main_doc,";
+		$sql .= " f.multicurrency_code, f.multicurrency_tx, f.multicurrency_total_ttc,";
 		$sql .= " f.retained_warranty, f.retained_warranty_date_limit,";
 		$sql .= " s.nom as socname, s.email, s.default_lang, s.tva_intra, s.siren, s.siret, s.ape, s.idprof4, s.idprof5, s.idprof6, s.euid, te.code as typent_code,";
 		if (getDolGlobalInt('DUNNING_NOPENALTY_CATEGORY') > 0) {	// Customers who never pay penalties
@@ -313,9 +314,11 @@ class Dunning
 			return -1;
 		}
 		$rows = array();
+		$companies = array();	// One answer per customer: the object of the core is heavy to build
+		$decimals = getDolGlobalInt('MAIN_MAX_DECIMALS_TOT', 2);	// Rounding of price2num(..., 'MT'), which reads the language at each call: too slow for many invoices
 		while ($obj = $this->db->fetch_object($resql)) {
-			$paid = (float) price2num((float) $obj->paid + (float) $obj->creditnotes + (float) $obj->deposits, 'MT');
-			$remain = (float) price2num((float) $obj->total_ttc - $paid, 'MT');
+			$paid = round((float) $obj->paid + (float) $obj->creditnotes + (float) $obj->deposits, $decimals);
+			$remain = round((float) $obj->total_ttc - $paid, $decimals);
 			$refdate = (int) $this->db->jdate($obj->refdate);
 			if ($remain > 0 && (float) $obj->retained_warranty > 0 && $obj->retained_warranty_date_limit) {
 				// Like Facture::hasDelay(), the retained warranty is due at its own date: the rest is reminded first, then the warranty from its date
@@ -324,15 +327,23 @@ class Dunning
 				if ($warranty > 0 && $remain <= $warranty) {
 					$refdate = max($refdate, $warrantydate);
 				} elseif ($warranty > 0 && $warrantydate > $today) {
-					$remain = (float) price2num($remain - $warranty, 'MT');
+					$remain = round($remain - $warranty, $decimals);
 				}
 			}
 			if ($remain > 0) {
 				$rows[(int) $obj->rowid] = array('id' => (int) $obj->rowid, 'ref' => $obj->ref, 'socid' => (int) $obj->fk_soc, 'socname' => $obj->socname,
 					'email' => (string) $obj->email, 'default_lang' => (string) $obj->default_lang, 'fk_projet' => (int) $obj->fk_projet,
 					'last_main_doc' => (string) $obj->last_main_doc, 'refdate' => $refdate, 'total_ttc' => (float) $obj->total_ttc, 'paid' => $paid, 'remain' => $remain,
-					'penaltysubject' => (!$obj->nopenalty && $this->isACompany($obj)), 'penaltyinvoice' => 0);
+					'penaltysubject' => (!$obj->nopenalty && ($companies[$obj->fk_soc] = ($companies[$obj->fk_soc] ?? $this->isACompany($obj)))), 'penaltyinvoice' => 0,
+					'currency' => $conf->currency, 'mc_rate' => 1.0, 'mc_total' => (float) $obj->total_ttc, 'mc_paid' => $paid, 'mc_remain' => $remain);
+				if ($obj->multicurrency_code && $obj->multicurrency_code != $conf->currency && (float) $obj->multicurrency_tx > 0) {	// Amounts in the currency of the invoice
+					$rows[(int) $obj->rowid] = array_merge($rows[(int) $obj->rowid], array('currency' => $obj->multicurrency_code, 'mc_rate' => (float) $obj->multicurrency_tx,
+						'mc_total' => (float) $obj->multicurrency_total_ttc, 'mc_remainbefore' => round((float) $obj->total_ttc - $paid, $decimals)));
+				}
 			}
+		}
+		if ($this->setForeignAmounts($rows, $decimals) < 0) {
+			return -1;
 		}
 		if (empty($rows)) {
 			return array();
@@ -368,6 +379,47 @@ class Dunning
 		}
 
 		return $result;
+	}
+
+	/**
+	 * Paid and remaining amounts in the currency of the invoices in a foreign currency, like CommonInvoice::getRemainToPay(1):
+	 * payments, credit notes and deposits in this currency. One query, only when such invoices are reminded.
+	 *
+	 * @param	array<int,array<string,mixed>>	$rows		Invoices being read by getInvoices(), changed in place
+	 * @param	int								$decimals	Decimals of the totals
+	 * @return	int											0 if OK, -1 if error
+	 */
+	private function setForeignAmounts(array &$rows, $decimals)
+	{
+		$ids = array();
+		foreach ($rows as $id => $row) {
+			if (isset($row['mc_remainbefore'])) {
+				$ids[] = $id;
+			}
+		}
+		if (empty($ids)) {
+			return 0;
+		}
+		$sql = "SELECT f.rowid, (SELECT SUM(pf.multicurrency_amount) FROM ".$this->db->prefix()."paiement_facture as pf WHERE pf.fk_facture = f.rowid) as paid,";
+		$sql .= " (SELECT SUM(rc.multicurrency_amount_ttc) FROM ".$this->db->prefix()."societe_remise_except as rc, ".$this->db->prefix()."facture as fs";	// Credit notes and deposits used
+		$sql .= " WHERE rc.fk_facture_source = fs.rowid AND rc.fk_facture = f.rowid";
+		$sql .= " AND fs.type IN (".$this->db->sanitize(Facture::TYPE_STANDARD.", ".Facture::TYPE_CREDIT_NOTE.", ".Facture::TYPE_SITUATION.", ".Facture::TYPE_DEPOSIT).")) as discounts";
+		$sql .= " FROM ".$this->db->prefix()."facture as f WHERE f.rowid IN (".$this->db->sanitize(implode(',', $ids)).")";
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+		while ($obj = $this->db->fetch_object($resql)) {
+			$row = &$rows[(int) $obj->rowid];
+			$row['mc_paid'] = round((float) $obj->paid + (float) $obj->discounts, $decimals);
+			$remain = round($row['mc_total'] - $row['mc_paid'], $decimals);
+			// A retained warranty not due yet lowers the rest in the currency of the company: the same share in the currency of the invoice
+			$row['mc_remain'] = ($row['mc_remainbefore'] > 0 && $row['remain'] < $row['mc_remainbefore'] ? round($remain * $row['remain'] / $row['mc_remainbefore'], $decimals) : $remain);
+			unset($row['mc_remainbefore'], $row);
+		}
+
+		return 0;
 	}
 
 	/**
@@ -631,56 +683,81 @@ class Dunning
 	 */
 	public function getSubstitutions(array $group, stdClass $level, Translate $outputlangs, $now)
 	{
-		global $conf;
-
-		$total = 0;
 		$late = 0;
-		$penalties = 0;
-		$indemnity = 0;
 		$amounts = array();
+		$totals = array();	// By currency: rest to pay, penalties, indemnity
 		foreach ($group as $key => $row) {
-			$amounts[$key] = $this->getPenalties($row, $now);
-			$total += $row->remain;
+			$amounts[$key] = $this->getPenalties($row, $now);	// In the currency of the company: converted at the rate of the invoice
 			$late = max($late, $amounts[$key]['days']);
-			$penalties += $amounts[$key]['penalties'];
-			$indemnity += $amounts[$key]['indemnity'];
+			$total = $totals[$row->currency] ?? array('remain' => 0.0, 'penalties' => 0.0, 'indemnity' => 0.0);
+			$total['remain'] += $row->mc_remain;
+			$total['penalties'] += $amounts[$key]['penalties'] * $row->mc_rate;
+			$total['indemnity'] += $amounts[$key]['indemnity'] * $row->mc_rate;
+			$totals[$row->currency] = $total;
 		}
-		$withpenalties = ($penalties + $indemnity > 0);	// A column only when something is due
+		$withpenalties = ($this->formatTotals($totals, array('penalties', 'indemnity'), $outputlangs) !== '');	// A column only when something is due
 		$table = '<table border="1" cellpadding="4" style="border-collapse: collapse"><tr><th>'.$outputlangs->trans('Ref').'</th><th>'.$outputlangs->trans('DateDue').'</th>';
 		$table .= '<th>'.$outputlangs->trans('Late').'</th><th>'.$outputlangs->trans('AmountTTC').'</th><th>'.$outputlangs->trans('AlreadyPaid').'</th><th>'.$outputlangs->trans('RemainderToPay').'</th>';
 		$table .= ($withpenalties ? '<th>'.$outputlangs->trans('DunningPenaltiesColumn').'</th>' : '').'</tr>';
 		foreach ($group as $key => $row) {
 			$table .= '<tr><td><a href="'.dolPrintHTMLForAttributeUrl(getOnlinePaymentUrl(0, 'invoice', $row->ref)).'">'.dolPrintLabel($row->ref).'</a></td>';
 			$table .= '<td>'.dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs).'</td><td style="text-align: right">'.$amounts[$key]['days'].'</td>';
-			$table .= '<td style="text-align: right">'.price($row->total_ttc, 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>';
-			$table .= '<td style="text-align: right">'.price($row->paid, 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>';	// Payments, credit notes and deposits used
-			$table .= '<td style="text-align: right">'.price($row->remain, 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>';
-			$table .= ($withpenalties ? '<td style="text-align: right">'.price($amounts[$key]['penalties'] + $amounts[$key]['indemnity'], 0, $outputlangs, 1, -1, -1, $conf->currency).'</td>' : '').'</tr>';
+			$table .= '<td style="text-align: right">'.price($row->mc_total, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';
+			$table .= '<td style="text-align: right">'.price($row->mc_paid, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';	// Payments, credit notes and deposits used
+			$table .= '<td style="text-align: right">'.price($row->mc_remain, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';
+			$table .= ($withpenalties ? '<td style="text-align: right">'.price(($amounts[$key]['penalties'] + $amounts[$key]['indemnity']) * $row->mc_rate, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>' : '').'</tr>';
 		}
-		$formatted = price($total, 0, $outputlangs, 1, -1, -1, $conf->currency);
-		$withall = price($total + $penalties + $indemnity, 0, $outputlangs, 1, -1, -1, $conf->currency);
+		$formatted = $this->formatTotals($totals, array('remain'), $outputlangs);
+		$withall = $this->formatTotals($totals, array('remain', 'penalties', 'indemnity'), $outputlangs);
 		$parts = array();
-		if ($penalties > 0) {
-			$parts[] = $outputlangs->transnoentitiesnoconv('DunningPenaltiesTextPenalties', price($penalties, 0, $outputlangs, 1, -1, -1, $conf->currency), price($this->getSetupNumber('DUNNING_PENALTY_RATE'), 0, $outputlangs));
+		if ($this->formatTotals($totals, array('penalties'), $outputlangs) !== '') {
+			$parts[] = $outputlangs->transnoentitiesnoconv('DunningPenaltiesTextPenalties', $this->formatTotals($totals, array('penalties'), $outputlangs), price($this->getSetupNumber('DUNNING_PENALTY_RATE'), 0, $outputlangs));
 		}
-		if ($indemnity > 0) {
-			$parts[] = $outputlangs->transnoentitiesnoconv('DunningPenaltiesTextIndemnity', price($indemnity, 0, $outputlangs, 1, -1, -1, $conf->currency));
+		if ($this->formatTotals($totals, array('indemnity'), $outputlangs) !== '') {
+			$parts[] = $outputlangs->transnoentitiesnoconv('DunningPenaltiesTextIndemnity', $this->formatTotals($totals, array('indemnity'), $outputlangs));
 		}
-		$text = ($parts ? $outputlangs->transnoentitiesnoconv($penalties > 0 ? 'DunningPenaltiesText' : 'DunningPenaltiesTextOne', implode(' '.$outputlangs->transnoentitiesnoconv('and').' ', $parts), $withall) : '');
+		$plural = ($this->formatTotals($totals, array('penalties'), $outputlangs) !== '');	// The indemnity alone "is due"
+		$text = ($parts ? $outputlangs->transnoentitiesnoconv($plural ? 'DunningPenaltiesText' : 'DunningPenaltiesTextOne', implode(' '.$outputlangs->transnoentitiesnoconv('and').' ', $parts), $withall) : '');
+		$single = (count($totals) == 1 ? reset($totals)['remain'] : array_sum(array_column($group, 'remain')));	// Else in the currency of the company
 
 		return array(
 			'__DUNNING_LEVEL__' => $level->label,
 			'__DUNNING_DAYS_LATE__' => (string) $late,
 			'__DUNNING_INVOICES__' => $table.'</table>',
 			'__DUNNING_TOTAL_REMAIN__' => $formatted,
-			'__DUNNING_PENALTIES__' => price($penalties, 0, $outputlangs, 1, -1, -1, $conf->currency),
-			'__DUNNING_INDEMNITY__' => price($indemnity, 0, $outputlangs, 1, -1, -1, $conf->currency),
+			'__DUNNING_PENALTIES__' => $this->formatTotals($totals, array('penalties'), $outputlangs, true),
+			'__DUNNING_INDEMNITY__' => $this->formatTotals($totals, array('indemnity'), $outputlangs, true),
 			'__DUNNING_TOTAL_WITH_PENALTIES__' => $withall,
 			'__DUNNING_PENALTIES_TEXT__' => $text,
-			'__AMOUNT_REMAIN__' => (string) price2num($total, 'MT'),
+			'__AMOUNT_REMAIN__' => (string) price2num($single, 'MT'),
 			'__AMOUNT_REMAIN_FORMATTED__' => $formatted,
 			'__AMOUNT_REMAIN_FORMATED__' => $formatted,	// Old spelling kept by the core
 		);
+	}
+
+	/**
+	 * Amounts of several currencies in one text: "1 200,00 € + 300,00 US$"
+	 *
+	 * @param	array<string,array{remain:float,penalties:float,indemnity:float}>	$totals		Amounts by currency
+	 * @param	string[]															$fields		Fields added for each currency
+	 * @param	Translate															$outputlangs	Language
+	 * @param	bool																$zero		True to show a zero amount, else an empty text when everything is zero
+	 * @return	string																			Text
+	 */
+	private function formatTotals(array $totals, array $fields, Translate $outputlangs, $zero = false)
+	{
+		$texts = array();
+		foreach ($totals as $currency => $total) {
+			$amount = 0.0;
+			foreach ($fields as $field) {
+				$amount += $total[$field];
+			}
+			if ($zero || (float) price2num($amount, 'MT') != 0) {
+				$texts[] = price($amount, 0, $outputlangs, 1, -1, 'MT', (string) $currency);
+			}
+		}
+
+		return implode(' + ', $texts);
 	}
 
 	/**
@@ -824,7 +901,7 @@ class Dunning
 		}
 		$groups = array();
 		foreach ($rows as $row) {
-			$groups[($row->next->percustomer || $forcegroup) ? $row->socid.'_'.$row->next->rowid : 'i'.$row->id][] = $row;
+			$groups[($row->next->percustomer || $forcegroup) ? $row->socid.'_'.$row->next->rowid.'_'.$row->currency : 'i'.$row->id][] = $row;	// One email per currency
 		}
 
 		$this->output = '';
@@ -1295,6 +1372,91 @@ class Dunning
 		}
 
 		return $nb;
+	}
+
+	/**
+	 * Statistics of the reminders sent between two dates, by month of the reminder and by level: reminders, invoices reminded, amount paid
+	 * within 30 days after a reminder (each payment counted once, for the last reminder before it), and average days from the first reminder
+	 * of an invoice to its full payment. Computed in PHP from 4 queries, the same with MySQL and PostgreSQL.
+	 *
+	 * @param	User	$user	User reading
+	 * @param	int		$from	Start of the period
+	 * @param	int		$to		End of the period
+	 * @return	array{months:array<string,array{reminders:int,invoices:int,paid30:float,delay:float,closed:int}>,levels:array<int,array{label:string,reminders:int,paid30:float}>}|int<-1,-1>	Statistics, -1 if error
+	 */
+	public function getStatistics(User $user, $from, $to)
+	{
+		global $langs;
+
+		if (!$user->hasRight('dunning', 'read') || !$user->hasRight('facture', 'lire')) {
+			$this->error = $langs->trans('NotEnoughPermissions');
+			return -1;
+		}
+		$levels = $this->fetchLevels();
+		if (!is_array($levels)) {
+			return -1;
+		}
+		$where = " FROM ".$this->db->prefix()."actioncomm as a WHERE a.entity IN (".getEntity('agenda').") AND a.elementtype = 'invoice'";
+		$where .= " AND a.code LIKE '".$this->db->escape($this->db->escapeforlike(self::CODE_PREFIX))."%".$this->db->escape($this->db->escapeforlike(self::CODE_SENT_SUFFIX))."'";
+		$where .= " AND a.datep >= '".$this->db->idate($from)."' AND a.datep <= '".$this->db->idate($to)."'";
+		$queries = array(
+			'reminders' => "SELECT a.fk_element as id, a.code, a.datep as date".$where." ORDER BY a.datep",
+			'payments' => "SELECT pf.fk_facture as id, p.datep as date, pf.amount FROM ".$this->db->prefix()."paiement_facture as pf INNER JOIN ".$this->db->prefix()."paiement as p ON p.rowid = pf.fk_paiement WHERE pf.fk_facture IN (SELECT a.fk_element".$where.")",
+			'closed' => "SELECT f.rowid as id, f.date_closing as date FROM ".$this->db->prefix()."facture as f WHERE f.paye = 1 AND f.entity IN (".getEntity('invoice').") AND f.rowid IN (SELECT a.fk_element".$where.")",
+		);
+		$data = array();
+		foreach ($queries as $name => $sql) {	// 3 queries
+			$resql = $this->db->query($sql);
+			if (!$resql) {
+				$this->error = $this->db->lasterror();
+				return -1;
+			}
+			$data[$name] = array();
+			while ($obj = $this->db->fetch_object($resql)) {
+				$obj->id = (int) $obj->id;
+				$obj->date = (int) $this->db->jdate($obj->date);
+				$data[$name][] = $obj;
+			}
+		}
+
+		$result = array('months' => array(), 'levels' => array());
+		$byinvoice = array();
+		$month = array('reminders' => 0, 'invoices' => 0, 'paid30' => 0.0, 'delay' => 0.0, 'closed' => 0);
+		foreach ($data['reminders'] as $reminder) {
+			$key = dol_print_date($reminder->date, '%Y-%m', 'tzserver');
+			$reg = array();
+			$levelid = (preg_match('/^'.self::CODE_PREFIX.'(\d+)'.self::CODE_SENT_SUFFIX.'$/', $reminder->code, $reg) ? (int) $reg[1] : 0);
+			$result['months'][$key] = $result['months'][$key] ?? $month;
+			$result['months'][$key]['reminders']++;
+			$result['months'][$key]['invoices'] += (isset($byinvoice[$reminder->id]) ? 0 : 1);	// Counted in the month of its first reminder
+			$result['levels'][$levelid] = $result['levels'][$levelid] ?? array('label' => (isset($levels[$levelid]) ? $levels[$levelid]->label : (string) $levelid), 'reminders' => 0, 'paid30' => 0.0);
+			$result['levels'][$levelid]['reminders']++;
+			$byinvoice[$reminder->id][] = array($reminder->date, $key, $levelid);
+		}
+		foreach ($data['payments'] as $payment) {	// To the last reminder before the payment, if it is at most 30 days before
+			$last = null;
+			foreach ($byinvoice[$payment->id] ?? array() as $reminder) {
+				$last = ($reminder[0] <= $payment->date ? $reminder : $last);
+			}
+			if ($last && $payment->date <= dol_time_plus_duree($last[0], 30, 'd', 0, 'tzserver')) {
+				$result['months'][$last[1]]['paid30'] += (float) $payment->amount;
+				$result['levels'][$last[2]]['paid30'] += (float) $payment->amount;
+			}
+		}
+		$delays = array();
+		foreach ($data['closed'] as $invoice) {	// Days from the first reminder of the invoice to its full payment
+			$first = $byinvoice[$invoice->id][0];
+			if ($invoice->date >= $first[0]) {
+				$delays[$first[1]][] = (int) round(($invoice->date - $first[0]) / 86400);
+			}
+		}
+		foreach ($delays as $key => $days) {
+			$result['months'][$key]['delay'] = round(array_sum($days) / count($days), 1);
+			$result['months'][$key]['closed'] = count($days);
+		}
+		ksort($result['months']);
+
+		return $result;
 	}
 
 	/**
