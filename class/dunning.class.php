@@ -335,7 +335,8 @@ class Dunning
 					'email' => (string) $obj->email, 'default_lang' => (string) $obj->default_lang, 'fk_projet' => (int) $obj->fk_projet,
 					'last_main_doc' => (string) $obj->last_main_doc, 'refdate' => $refdate, 'total_ttc' => (float) $obj->total_ttc, 'paid' => $paid, 'remain' => $remain,
 					'penaltysubject' => (!$obj->nopenalty && ($companies[$obj->fk_soc] = ($companies[$obj->fk_soc] ?? $this->isACompany($obj)))), 'penaltyinvoice' => 0,
-					'currency' => $conf->currency, 'mc_rate' => 1.0, 'mc_total' => (float) $obj->total_ttc, 'mc_paid' => $paid, 'mc_remain' => $remain);
+					'currency' => $conf->currency, 'mc_rate' => 1.0, 'mc_total' => (float) $obj->total_ttc, 'mc_paid' => $paid, 'mc_remain' => $remain,
+					'installment' => 0, 'installments' => array());
 				if ($obj->multicurrency_code && $obj->multicurrency_code != $conf->currency && (float) $obj->multicurrency_tx > 0) {	// Amounts in the currency of the invoice
 					$rows[(int) $obj->rowid] = array_merge($rows[(int) $obj->rowid], array('currency' => $obj->multicurrency_code, 'mc_rate' => (float) $obj->multicurrency_tx,
 						'mc_total' => (float) $obj->multicurrency_total_ttc, 'mc_remainbefore' => round((float) $obj->total_ttc - $paid, $decimals)));
@@ -347,6 +348,9 @@ class Dunning
 		}
 		if (empty($rows)) {
 			return array();
+		}
+		if (isModEnabled('paymentschedule') && $this->applyInstallments($rows, $today, $decimals) < 0) {
+			return -1;
 		}
 
 		$events = $this->getEvents(array_keys($rows));
@@ -363,7 +367,8 @@ class Dunning
 				$promiseamount[$event->fk_element] = array((float) (json_decode((string) $event->extraparams, true)['amount'] ?? 0), $event->datec);
 			} elseif ($event->code == self::CODE_PENALTY_INVOICE) {
 				$rows[$event->fk_element]['penaltyinvoice'] = (int) (json_decode((string) $event->extraparams, true)['invoice'] ?? 0);
-			} elseif (preg_match('/^'.self::CODE_PREFIX.'(\d+)'.self::CODE_SENT_SUFFIX.'$/', $event->code, $reg)) {
+			} elseif (preg_match('/^'.self::CODE_PREFIX.'(\d+)'.self::CODE_SENT_SUFFIX.'$/', $event->code, $reg)
+				&& (int) (json_decode((string) $event->extraparams, true)['installment'] ?? 0) == $rows[$event->fk_element]['installment']) {	// The levels of the installment reminded
 				$sent[$event->fk_element][(int) $reg[1]] = $event->datep;
 			}
 		}
@@ -420,6 +425,61 @@ class Dunning
 			// A retained warranty not due yet lowers the rest in the currency of the company: the same share in the currency of the invoice
 			$row['mc_remain'] = ($row['mc_remainbefore'] > 0 && $row['remain'] < $row['mc_remainbefore'] ? round($remain * $row['remain'] / $row['mc_remainbefore'], $decimals) : $remain);
 			unset($row['mc_remainbefore'], $row);
+		}
+
+		return 0;
+	}
+
+	/**
+	 * Invoices with a schedule of expected payments (module Echeances): reminded installment by installment. What is paid goes to the
+	 * installments by date, like in the module Echeances; the reference date is the oldest unpaid installment, the rest to pay the unpaid
+	 * part of the installments due (of the next one before its date), the late installments kept for the penalties.
+	 *
+	 * @param	array<int,array<string,mixed>>	$rows		Invoices being read by getInvoices(), changed in place
+	 * @param	int								$today		First hour of the day of the reading
+	 * @param	int								$decimals	Decimals of the totals
+	 * @return	int											0 if OK, -1 if error
+	 */
+	private function applyInstallments(array &$rows, $today, $decimals)
+	{
+		$sql = "SELECT s.fk_element, l.rowid, l.date_due, l.amount FROM ".$this->db->prefix()."paymentschedule_line as l";
+		$sql .= " INNER JOIN ".$this->db->prefix()."paymentschedule as s ON s.rowid = l.fk_schedule";
+		$sql .= " WHERE s.element = 'facture' AND s.billing = 0 AND l.status <> 9";	// 9: installment abandoned
+		$sql .= " AND s.fk_element IN (".$this->db->sanitize(implode(',', array_map('intval', array_keys($rows)))).")";
+		$sql .= $this->db->order('s.fk_element,l.date_due,l.rang,l.rowid', 'ASC,ASC,ASC,ASC');
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			dol_syslog(__METHOD__.' '.$this->error, LOG_ERR);
+			return -1;
+		}
+		$unpaid = array();
+		$left = array();
+		while ($obj = $this->db->fetch_object($resql)) {
+			$id = (int) $obj->fk_element;
+			$left[$id] = $left[$id] ?? $rows[$id]['paid'];
+			$paid = min((float) $obj->amount, max(0.0, $left[$id]));
+			$left[$id] -= $paid;
+			if (round((float) $obj->amount - $paid, $decimals) > 0) {
+				$unpaid[$id][] = array((int) $obj->rowid, dol_get_first_hour((int) $this->db->jdate($obj->date_due)), round((float) $obj->amount - $paid, $decimals), (float) $obj->amount);
+			}
+		}
+		foreach ($unpaid as $id => $installments) {
+			$due = 0.0;
+			$amount = 0.0;
+			$late = array();
+			foreach ($installments as $installment) {
+				$due += ($installment[1] <= $today ? $installment[2] : 0.0);
+				$amount += ($installment[1] <= $today ? $installment[3] : 0.0);
+				if ($installment[1] < $today) {
+					$late[] = array($installment[1], $installment[2]);
+				}
+			}
+			$remain = round($due ?: $installments[0][2], $decimals);
+			$amount = ($due ? $amount : $installments[0][3]);	// Amount of the installments reminded, shown in the email
+			$ratio = ($rows[$id]['total_ttc'] != 0 ? $rows[$id]['mc_total'] / $rows[$id]['total_ttc'] : 1.0);
+			$rows[$id] = array_merge($rows[$id], array('installment' => $installments[0][0], 'refdate' => $installments[0][1], 'remain' => $remain, 'installments' => $late,
+				'mc_remain' => round($remain * $ratio, $decimals), 'mc_installments' => round($amount * $ratio, $decimals)));
 		}
 
 		return 0;
@@ -734,10 +794,12 @@ class Dunning
 		$table .= '<th>'.$outputlangs->trans('Late').'</th><th>'.$outputlangs->trans('AmountTTC').'</th><th>'.$outputlangs->trans('AlreadyPaid').'</th><th>'.$outputlangs->trans('RemainderToPay').'</th>';
 		$table .= ($withpenalties ? '<th>'.$outputlangs->trans('DunningPenaltiesColumn').'</th>' : '').'</tr>';
 		foreach ($group as $key => $row) {
-			$table .= '<tr><td><a href="'.dolPrintHTMLForAttributeUrl(getOnlinePaymentUrl(0, 'invoice', $row->ref)).'">'.dolPrintLabel($row->ref).'</a></td>';
+			$installment = !empty($row->installment);	// Payment schedule: the installments reminded, not the whole invoice
+			$table .= '<tr><td><a href="'.dolPrintHTMLForAttributeUrl(getOnlinePaymentUrl(0, 'invoice', $row->ref)).'">'.dolPrintLabel($row->ref).'</a>';
+			$table .= ($installment ? '<br>'.dolPrintLabel($outputlangs->transnoentitiesnoconv('DunningInstallmentOf', dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs))) : '').'</td>';
 			$table .= '<td>'.dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs).'</td><td style="text-align: right">'.$amounts[$key]['days'].'</td>';
-			$table .= '<td style="text-align: right">'.price($row->mc_total, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';
-			$table .= '<td style="text-align: right">'.price($row->mc_paid, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';	// Payments, credit notes and deposits used
+			$table .= '<td style="text-align: right">'.price($installment ? $row->mc_installments : $row->mc_total, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';
+			$table .= '<td style="text-align: right">'.price($installment ? $row->mc_installments - $row->mc_remain : $row->mc_paid, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';	// Payments, credit notes and deposits used
 			$table .= '<td style="text-align: right">'.price($row->mc_remain, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';
 			$table .= ($withpenalties ? '<td style="text-align: right">'.price(($amounts[$key]['penalties'] + $amounts[$key]['indemnity']) * $row->mc_rate, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>' : '').'</tr>';
 		}
@@ -857,7 +919,11 @@ class Dunning
 		$days = $this->daysLate($row->refdate, $now);
 		$result = array('days' => $days, 'penalties' => 0.0, 'indemnity' => 0.0);
 		if ($days > 0 && $row->penaltysubject) {
-			$result['penalties'] = (float) price2num($row->remain * $this->getSetupNumber('DUNNING_PENALTY_RATE') / 100 * $days / 365, 'MT');
+			$penalties = 0.0;
+			foreach (empty($row->installments) ? array(array($row->refdate, $row->remain)) : $row->installments as $part) {	// With a payment schedule: each late installment from its date
+				$penalties += $part[1] * $this->getSetupNumber('DUNNING_PENALTY_RATE') / 100 * $this->daysLate($part[0], $now) / 365;
+			}
+			$result['penalties'] = (float) price2num($penalties, 'MT');
 			$result['indemnity'] = (float) price2num($this->getSetupNumber('DUNNING_FIXED_INDEMNITY'), 'MT');
 		}
 
@@ -977,12 +1043,12 @@ class Dunning
 		$alreadysent = array();
 		foreach ($events as $event) {
 			if ($event->code == $sentcode) {
-				$alreadysent[$event->fk_element] = 1;
+				$alreadysent[$event->fk_element][(int) (json_decode((string) $event->extraparams, true)['installment'] ?? 0)] = 1;
 			}
 		}
 		$tosend = array();
 		foreach ($group as $row) {
-			if (empty($alreadysent[$row->id])) {
+			if (empty($alreadysent[$row->id][$row->installment])) {
 				$tosend[] = $row;
 			}
 		}
@@ -1099,6 +1165,7 @@ class Dunning
 			$event->type_code = 'AC_OTH_AUTO';
 			$event->code = $sentcode;
 			$event->label = $langs->transnoentities('DunningEventLabel', $level->label);
+			$event->extraparams = ($row->installment ? array('installment' => $row->installment) : null);	// Encoded by ActionComm::create()
 			$event->note_private = $content;
 			$event->socid = $row->socid;
 			$event->fk_project = $row->fk_projet;

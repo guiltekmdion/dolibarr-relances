@@ -176,7 +176,7 @@ class DunningTest extends CommonClassTest
 
 		$module = new modDunning($db);
 
-		$this->assertSame(array('1.3.2', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
+		$this->assertSame(array('1.4.0', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
 		$this->assertTrue((bool) $db->query("SELECT rowid FROM ".$db->prefix()."dunning_level"), 'Enabling the module creates its table: '.$db->lasterror());
 		$this->assertSame(0, $module->cronjobs[0]['status']);
 		$this->assertSame(array('DUNNING_START_DATE', 1), array($module->const[0][0], $module->const[0][6]), 'A module enabled again does not send the past');
@@ -1375,6 +1375,81 @@ class DunningTest extends CommonClassTest
 	}
 
 	/**
+	 * Invoice with a schedule of expected payments (module Payment schedules, its tables made temporary here): the oldest unpaid installment
+	 * for the amount due, penalties from the date of each late installment and the indemnity once, the levels kept by installment (an old
+	 * event of the invoice ignored, a level sent once per installment), the next installment from the first level once the others are paid
+	 *
+	 * @return void
+	 */
+	public function testDunningInstallments()
+	{
+		global $conf;
+
+		$db = $this->savdb;
+		$p = $db->prefix();
+		foreach (array(
+			"CREATE TEMPORARY TABLE ".$p."paymentschedule (rowid integer, element varchar(32), fk_element integer, billing integer)",
+			"CREATE TEMPORARY TABLE ".$p."paymentschedule_line (rowid integer, fk_schedule integer, rang integer, date_due date, amount numeric(24,8), status integer)",
+		) as $sql) {
+			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+		}
+		$savmodule = $conf->modules['paymentschedule'] ?? null;
+		$conf->modules['paymentschedule'] = 'paymentschedule';
+		$now = dol_now();
+		$today = dol_get_first_hour($now);
+		$socid = $this->createCustomer('installments@example.com');
+		$this->assertTrue((bool) $db->query("UPDATE ".$p."societe SET tva_intra = 'FR00123456789' WHERE rowid = ".((int) $socid)));
+		$levels = $this->createLevels(array(-3, 15));
+		$id = $this->createInvoice($socid, -20);	// 120, its due date on its first installment like the module does
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$p."paymentschedule VALUES (990001, 'facture', ".((int) $id).", 0)"));
+		foreach (array(990011 => -20, 990012 => -5, 990013 => 40) as $lineid => $days) {
+			$this->assertTrue((bool) $db->query("INSERT INTO ".$p."paymentschedule_line VALUES (".$lineid.", 990001, 0, '".$db->idate(dol_time_plus_duree($today, $days, 'd'))."', 40, 0)"));
+		}
+		$conf->global->DUNNING_PENALTY_RATE = '10';
+		$conf->global->DUNNING_FIXED_INDEMNITY = '40';
+		$this->addSentEvent($id, $socid, $levels[15], $now);	// Before the schedule, for the whole invoice
+		$dunning = new Dunning($db);
+
+		$row = $dunning->getInvoices($this->savuser, $now, array($socid))[$id];
+		$this->assertSame(array(990011, dol_time_plus_duree($today, -20, 'd'), 80.0), array($row->installment, $row->refdate, $row->remain), 'The oldest unpaid installment, the 2 late ones due');
+		$this->assertSame($levels[15], $row->next->rowid ?? 0, 'An event of the invoice before its schedule does not count');
+		$this->assertTrue($row->due);
+		$this->assertSame(array('days' => 20, 'penalties' => 0.27, 'indemnity' => 40.0), $dunning->getPenalties($row, $now), '40 x 10 % x 20 / 365 + 40 x 10 % x 5 / 365, the indemnity once');
+
+		$table = $dunning->getSubstitutions(array($row), $row->next, $this->savlangs, $now)['__DUNNING_INVOICES__'];
+		$this->assertStringContainsString($this->savlangs->transnoentitiesnoconv('DunningInstallmentOf', dol_print_date($row->refdate, 'day', 'tzserver', $this->savlangs)), $table);
+		foreach (array(80, 0, 80) as $n => $amount) {	// Amount of the 2 installments, paid, rest: not the 120 of the invoice
+			$this->assertSame(1, preg_match_all('/'.preg_quote(price($amount, 0, $this->savlangs, 1, -1, -1, $conf->currency), '/').'/', $table) > 0 ? 1 : 0, 'Column '.$n);
+		}
+		$this->assertStringNotContainsString(price(120, 0, $this->savlangs, 1, -1, -1, $conf->currency), $table);
+
+		$hook = $this->captureMails();
+		$this->assertSame(0, $dunning->send($this->savuser, array($id => $row)), implode(', ', $dunning->errors));
+		$this->assertCount(1, $hook->mails);
+		$events = $dunning->getEvents(array($id));
+		$this->assertSame(array('installment' => 990011), json_decode((string) end($events)->extraparams, true), 'The installment in the event');
+		$this->assertSame(0, $dunning->send($this->savuser, array($id => $row)));
+		$this->assertCount(1, $hook->mails, 'Once per installment');
+		$row = $dunning->getInvoices($this->savuser, $now, array($socid))[$id];
+		$this->assertSame(array($levels[15], 0), array($row->last->rowid ?? 0, $row->next->rowid ?? 0), 'Its last level sent');
+
+		$this->addPayment($id, 80.0);	// The 2 late installments paid: the next one from the first level again, before its date
+		$row = $dunning->getInvoices($this->savuser, $now, array(), 0, $id)[$id];
+		$this->assertSame(array(990013, dol_time_plus_duree($today, 40, 'd'), 40.0, 0), array($row->installment, $row->refdate, $row->remain, $row->last->rowid ?? 0));
+		$this->assertSame(array($levels[-3], false), array($row->next->rowid ?? 0, $row->due));
+
+		unset($conf->modules['paymentschedule']);	// Module disabled: the invoice as a whole again
+		$row = $dunning->getInvoices($this->savuser, $now, array(), 0, $id)[$id];
+		$this->assertSame(array(0, 40.0), array($row->installment, $row->remain));
+		if ($savmodule !== null) {
+			$conf->modules['paymentschedule'] = $savmodule;
+		}
+		$drop = ($db->type == 'pgsql' ? "DROP TABLE " : "DROP TEMPORARY TABLE ");	// Without TEMPORARY, MySQL commits the transaction of the tests
+		$this->assertTrue((bool) $db->query($drop.$p."paymentschedule_line"));
+		$this->assertTrue((bool) $db->query($drop.$p."paymentschedule"));
+	}
+
+	/**
 	 * Replace the sending of emails by a hook that records them
 	 *
 	 * @return CommonHookActions	Hook, with the recipients and subject of each email in ->mails, its files in ->files, its body in ->bodies
@@ -1530,13 +1605,15 @@ class DunningTest extends CommonClassTest
 	 * @param	int		$socid		Customer
 	 * @param	int		$levelid	Level
 	 * @param	int		$datep		Date of the sending
+	 * @param	int		$installment	Installment of the payment schedule reminded, 0 for the invoice
 	 * @return	void
 	 */
-	private function addSentEvent($id, $socid, $levelid, $datep)
+	private function addSentEvent($id, $socid, $levelid, $datep, $installment = 0)
 	{
 		$event = new ActionComm($this->savdb);
 		$event->type_code = 'AC_OTH_AUTO';
 		$event->code = Dunning::CODE_PREFIX.$levelid.Dunning::CODE_SENT_SUFFIX;
+		$event->extraparams = ($installment ? array('installment' => $installment) : null);
 		$event->label = 'DUNNINGTEST';
 		$event->socid = $socid;
 		$event->elementtype = 'invoice';

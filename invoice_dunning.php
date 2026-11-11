@@ -180,6 +180,9 @@ if (!$row) {
 		print ' ('.($row->auto ? $langs->trans('Automatic') : $langs->trans('DunningByHand')).')</span>';
 	}
 	print '</td></tr>';
+	if ($row->installment) {	// Payment schedule of the module Echeances: the installment reminded
+		print '<tr><td>'.$langs->trans('DunningInstallment').'</td><td>'.dol_print_date($row->refdate, 'day').' &nbsp; '.price($row->mc_remain, 0, $langs, 1, -1, -1, $row->currency).'</td></tr>';
+	}
 	print '<tr><td>'.$langs->trans('DunningPromise').'</td><td>'.($row->promise ? dol_print_date($row->promise, 'day') : '');
 	if ($row->promiseamount > 0) {
 		print ' &nbsp; '.price($row->promiseamount, 0, $langs, 1, -1, -1, $conf->currency).' <span class="opacitymedium">('.$langs->trans('DunningPromise'.dol_ucfirst($row->promisestatus)).')</span>';

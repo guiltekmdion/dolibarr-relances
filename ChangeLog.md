@@ -1,5 +1,9 @@
 # CHANGELOG MODULE DUNNING FOR [DOLIBARR ERP CRM](https://www.dolibarr.org)
 
+## 1.4.0
+
+- With the module [Payment schedules](https://github.com/guiltekmdion/dolibarr-echeances) enabled, an invoice with a schedule of expected payments is reminded installment by installment: the oldest unpaid installment and the amount due, the levels kept by installment (a paid installment lets the next one start again from the first level), late penalties counted from the date of each installment, the indemnity still once per invoice.
+
 ## 1.3.2
 
 - A customer without language gets the email template chosen for the level, in its language, whatever the language of the scheduled job.
