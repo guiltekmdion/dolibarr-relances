@@ -11,7 +11,8 @@ Le module envoie les emails de relance des factures clients impayées, niveau ap
   - **Envoi manuel** : la tâche n'envoie jamais ce niveau (une mise en demeure par exemple) : il attend dans la liste qu'un utilisateur l'envoie.
 - **Liste Facturation > Relances** : une ligne par client (factures, reste à payer, plus de 30 jours de retard, niveau atteint, promesse, prochaine relance), filtres sur le niveau, le commercial, le montant et les clients à relancer. Actions de masse : envoyer le niveau dû, envoyer un email par client, promesse de paiement, ne pas relancer.
 - **Onglet Relances de la facture** : niveau atteint, prochaine relance, destinataires, historique, boutons pour envoyer le niveau dû, noter une promesse de paiement ou ouvrir un litige (une facture en litige n'est jamais relancée).
-- **Promesse de paiement** : aucune relance jusqu'au jour promis, puis le niveau suivant.
+- **Promesse de paiement** : aucune relance jusqu'au jour promis, puis le niveau suivant. Avec un montant (onglet de la facture), la promesse est affichée tenue, en attente ou non tenue selon les paiements reçus depuis.
+- **Mise en demeure (PDF)** : un modèle de document des tiers (onglet Documents du client, à imprimer ou envoyer en recommandé) : les factures en retard du client, les pénalités dues et les coordonnées bancaires. Un niveau peut la joindre à son email.
 - **Clients jamais relancés** : un tag/catégorie choisi dans la configuration (module Tags/Catégories).
 - **Page d'accueil** : une ligne « Clients à relancer » dans le bloc Factures, qui ouvre la liste filtrée.
 - **Prêt à l'emploi** : à la première activation, 3 modèles d'email en français et en anglais (courtoisie, relance, mise en demeure) et 3 niveaux (3 jours avant l'échéance, 15 jours après avec un email par client, 30 jours après à la main).
@@ -48,7 +49,7 @@ Après une mise à jour du module, le désactiver puis le réactiver : les nouve
    - `__DUNNING_PENALTIES__`, `__DUNNING_INDEMNITY__`, `__DUNNING_TOTAL_WITH_PENALTIES__` : pénalités de retard, indemnité de recouvrement et total avec elles
    - `__DUNNING_PENALTIES_TEXT__` : une phrase qui cite les pénalités et l'indemnité dues, vide si rien n'est dû
    - les clés habituelles (`__REF__`, `__ONLINE_PAYMENT_URL__`...) marchent aussi, mais dans un email de plusieurs factures, seules les clés `__DUNNING_*__` les décrivent toutes.
-2. Configuration du module : une ligne par niveau, et le tag des clients jamais relancés.
+2. Configuration du module : une ligne par niveau (avec « Mise en demeure » pour joindre le PDF à son email), et le tag des clients jamais relancés.
 3. Pénalités de retard (facultatif) : le taux annuel (en France, par défaut le taux de la Banque centrale européenne majoré de 10 points : 12,40 % au 2e semestre 2026, au moins 3 fois le taux d'intérêt légal ; il change chaque semestre, voir [service-public.fr](https://entreprendre.service-public.gouv.fr/vosdroits/F23211)), l'indemnité forfaitaire de recouvrement (40 en France, une fois par facture en retard), et un tag des clients qui n'en doivent jamais. Seuls les clients reconnus comme entreprises par Dolibarr (numéro de TVA ou identifiant professionnel) doivent des pénalités. Elles sont affichées, jamais ajoutées à la facture : le bouton de l'onglet prépare une facture brouillon séparée, à vérifier et valider.
 4. Pour envoyer automatiquement : activer la tâche « Envoyer les relances des factures clients impayées » dans Accueil > Outils d'administration > Travaux planifiés, et laisser désactivée la tâche de relance de Dolibarr.
 

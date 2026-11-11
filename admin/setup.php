@@ -115,6 +115,7 @@ if ($action == 'savelevels') {
 	$templates = GETPOST('fk_email_template', 'array:int');
 	$percustomer = GETPOST('percustomer', 'array:int');
 	$byhand = GETPOST('byhand', 'array:int');
+	$joinnotice = GETPOST('joinnotice', 'array:int');
 	$active = GETPOST('active', 'array:int');
 	$db->begin();
 	foreach (array_merge(array_keys($levels), array(0)) as $id) {	// The levels shown, then the new one: bounded by the levels of the setup
@@ -122,7 +123,7 @@ if ($action == 'savelevels') {
 			continue;
 		}
 		$level = array('rowid' => $id, 'label' => trim($labels[$id]), 'nbdays' => (int) ($nbdays[$id] ?? 0), 'fk_c_type_contact' => max(0, (int) ($types[$id] ?? 0)),
-			'percustomer' => (empty($percustomer[$id]) ? 0 : 1), 'byhand' => (empty($byhand[$id]) ? 0 : 1), 'fk_email_template' => (int) ($templates[$id] ?? 0), 'active' => (empty($active[$id]) ? 0 : 1));
+			'percustomer' => (empty($percustomer[$id]) ? 0 : 1), 'byhand' => (empty($byhand[$id]) ? 0 : 1), 'joinnotice' => (empty($joinnotice[$id]) ? 0 : 1), 'fk_email_template' => (int) ($templates[$id] ?? 0), 'active' => (empty($active[$id]) ? 0 : 1));
 		if ($dunning->saveLevel($user, $level) < 0) {
 			setEventMessages($dunning->error, null, 'errors');
 			$error++;
@@ -191,8 +192,8 @@ print '<input type="hidden" name="action" value="savelevels">';
 print '<div class="div-table-responsive-no-min"><table class="noborder centpercent">';
 print '<tr class="liste_titre"><td>'.$form->textwithpicto($langs->trans('DunningNbDays'), $langs->trans('DunningNbDaysHelp')).'</td><td>'.$langs->trans('Label').'</td>';
 print '<td>'.$langs->trans('DunningRecipient').'</td><td class="center">'.$langs->trans('DunningPerCustomer').'</td>';
-print '<td class="center">'.$form->textwithpicto(dol_ucfirst($langs->trans('DunningByHand')), $langs->trans('DunningByHandHelp')).'</td><td>'.$langs->trans('EmailTemplate').'</td><td class="center">'.$langs->trans('Active').'</td></tr>';
-$levels[0] = (object) array('label' => '', 'nbdays' => '', 'fk_c_type_contact' => $billingtype, 'percustomer' => 0, 'byhand' => 0, 'fk_email_template' => 0, 'active' => 1, 'template_label' => '');
+print '<td class="center">'.$form->textwithpicto(dol_ucfirst($langs->trans('DunningByHand')), $langs->trans('DunningByHandHelp')).'</td><td class="center">'.$form->textwithpicto($langs->trans('DunningJoinNotice'), $langs->trans('DunningJoinNoticeHelp')).'</td><td>'.$langs->trans('EmailTemplate').'</td><td class="center">'.$langs->trans('Active').'</td></tr>';
+$levels[0] = (object) array('label' => '', 'nbdays' => '', 'fk_c_type_contact' => $billingtype, 'percustomer' => 0, 'byhand' => 0, 'joinnotice' => 0, 'fk_email_template' => 0, 'active' => 1, 'template_label' => '');
 foreach ($levels as $id => $level) {
 	print '<tr class="oddeven">';
 	print '<td><input type="number" class="width50" name="nbdays['.$id.']" value="'.dolPrintHTMLForAttribute((string) $level->nbdays).'"></td>';
@@ -200,6 +201,7 @@ foreach ($levels as $id => $level) {
 	print '<td>'.$form->selectarray('fk_c_type_contact['.$id.']', $types, $level->fk_c_type_contact, 1, 0, 0, '', 0, 0, 0, '', 'minwidth150', 0).'</td>';
 	print '<td class="center"><input type="checkbox" name="percustomer['.$id.']" value="1"'.($level->percustomer ? ' checked' : '').'></td>';
 	print '<td class="center"><input type="checkbox" name="byhand['.$id.']" value="1"'.($level->byhand ? ' checked' : '').'></td>';
+	print '<td class="center"><input type="checkbox" name="joinnotice['.$id.']" value="1"'.($level->joinnotice ? ' checked' : '').'></td>';
 	print '<td>'.$form->selectarray('fk_email_template['.$id.']', $templates, $level->fk_email_template, 1, 0, 0, '', 0, 0, 0, '', 'minwidth200', 0);
 	if ($id > 0 && empty($level->template_label)) {
 		$langs->load('errors');

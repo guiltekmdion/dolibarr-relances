@@ -267,7 +267,8 @@ foreach ($customers as $customer) {
 	print '<td class="right amount">'.price($customer['remain'], 0, $langs, 1, -1, -1, $conf->currency).'</td>';
 	print '<td class="right amount">'.($customer['late30'] ? price($customer['late30'], 0, $langs, 1, -1, -1, $conf->currency) : '').'</td>';
 	print '<td>'.($customer['level'] ? dolPrintLabel($customer['level']->label).' <span class="opacitymedium">'.dol_print_date($customer['leveldate'], 'day').'</span>' : '').'</td>';
-	print '<td class="center">'.($customer['promise'] ? dol_print_date($customer['promise'], 'day') : '').'</td>';
+	print '<td class="center">'.($customer['promise'] ? dol_print_date($customer['promise'], 'day') : '');
+	print ($customer['promisestatus'] ? ' <span class="opacitymedium">('.$langs->trans('DunningPromise'.dol_ucfirst($customer['promisestatus'])).')</span>' : '').'</td>';
 	print '<td>';
 	if ($customer['next']) {
 		print ($customer['due'] ? img_warning().' ' : '').dolPrintLabel($customer['next']->label).' <span class="opacitymedium">'.dol_print_date($customer['nextdate'], 'day');

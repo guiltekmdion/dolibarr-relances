@@ -24,6 +24,10 @@ CREATE TABLE llx_dunning_level(
 	fk_c_type_contact integer DEFAULT 0 NOT NULL,	-- external contact type of the invoice (llx_c_type_contact), 0 = email of the thirdparty
 	percustomer tinyint DEFAULT 0 NOT NULL,			-- 1 = one email per customer with all its invoices due at this level
 	byhand tinyint DEFAULT 0 NOT NULL,				-- 1 = never sent by the job: the reminder waits to be checked and sent by a user
+	joinnotice tinyint DEFAULT 0 NOT NULL,			-- 1 = the formal notice of the customer (PDF) is attached to the email
 	fk_email_template integer NOT NULL,				-- llx_c_email_templates (type facture_send), its label finds the version in the customer language
 	active tinyint DEFAULT 1 NOT NULL
 ) ENGINE=innodb;
+
+-- Columns added after the version 1.0.0, for a table created before (the error of a column already there is ignored)
+ALTER TABLE llx_dunning_level ADD COLUMN joinnotice tinyint DEFAULT 0 NOT NULL;

@@ -111,7 +111,7 @@ if (empty($reshook) && $action == 'confirm_send' && $confirm == 'yes' && $permis
 }
 if (empty($reshook) && $action == 'confirm_promise' && $confirm == 'yes' && $permissiontowrite && $row) {
 	// Noon of the day in the time zone of the server, like the dates of the reminders: the same day for every reader
-	if ($dunning->addPromise($user, array($row), GETPOSTDATE('promisedate', '12:00:00', 'tzserver'), GETPOST('promisenote', 'alphanohtml')) < 0) {
+	if ($dunning->addPromise($user, array($row), GETPOSTDATE('promisedate', '12:00:00', 'tzserver'), GETPOST('promisenote', 'alphanohtml'), (float) price2num(GETPOST('promiseamount', 'alpha'))) < 0) {
 		setEventMessages($dunning->error, null, 'errors');
 	} else {
 		setEventMessages($langs->trans('RecordSaved'), null);
@@ -157,6 +157,7 @@ if ($action == 'send' && $row && $row->due) {
 if ($action == 'promise' && $row) {
 	$formquestion = array(
 		array('type' => 'date', 'name' => 'promisedate', 'label' => $langs->trans('Date'), 'value' => dol_now()),
+		array('type' => 'text', 'name' => 'promiseamount', 'label' => $langs->trans('DunningPromiseAmount'), 'morecss' => 'width75'),
 		array('type' => 'text', 'name' => 'promisenote', 'label' => $langs->trans('Note')),
 	);
 	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('DunningPromise'), '', 'confirm_promise', $formquestion, 0, 1);
@@ -179,7 +180,11 @@ if (!$row) {
 		print ' ('.($row->auto ? $langs->trans('Automatic') : $langs->trans('DunningByHand')).')</span>';
 	}
 	print '</td></tr>';
-	print '<tr><td>'.$langs->trans('DunningPromise').'</td><td>'.($row->promise ? dol_print_date($row->promise, 'day') : '').'</td></tr>';
+	print '<tr><td>'.$langs->trans('DunningPromise').'</td><td>'.($row->promise ? dol_print_date($row->promise, 'day') : '');
+	if ($row->promiseamount > 0) {
+		print ' &nbsp; '.price($row->promiseamount, 0, $langs, 1, -1, -1, $conf->currency).' <span class="opacitymedium">('.$langs->trans('DunningPromise'.dol_ucfirst($row->promisestatus)).')</span>';
+	}
+	print '</td></tr>';
 	print '<tr><td>'.$langs->trans('MailTo').'</td><td>'.($to ? dolPrintLabel($to) : '<span class="opacitymedium">'.dolPrintLabel($langs->transnoentitiesnoconv('NoRecipientEmail', $object->thirdparty->name)).'</span>').'</td></tr>';
 	if ($amounts['penalties'] + $amounts['indemnity'] > 0 || $row->penaltyinvoice) {
 		print '<tr><td>'.$langs->trans('DunningPenalties').'</td><td>'.price($amounts['penalties'], 0, $langs, 1, -1, -1, $conf->currency);

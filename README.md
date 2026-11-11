@@ -11,7 +11,8 @@ The module sends reminder emails for the unpaid customer invoices, level after l
   - **By hand**: the job never sends this level (a last notice before legal action, for example): it waits in the list until a user sends it.
 - **List Billing > Reminders**: one line per customer (invoices, rest to pay, over 30 days late, level reached, promise, next reminder), filters on the level, the sales representative, the amount and the customers to remind. Mass actions: send the due level, send one email per customer, payment promise, do not remind.
 - **Tab Reminders on the invoice**: level reached, next reminder, recipients, history, buttons to send the due level, record a payment promise, or open a dispute (a disputed invoice is never reminded).
-- **Payment promise**: no reminder up to the promised day, then the next level.
+- **Payment promise**: no reminder up to the promised day, then the next level. With an amount (tab of the invoice), the promise is shown kept, pending or not kept according to the payments received since.
+- **Formal notice (PDF)**: a document model of the thirdparties (tab Documents of the customer, to print or send by registered mail): the late invoices of the customer, the penalties due and the bank details. A level can attach it to its email.
 - **Customers never reminded**: a tag/category chosen in the setup (needs the module Tags/Categories).
 - **Home page**: a line "Customers to remind" in the Invoices block, which opens the list filtered on them.
 - **Ready to use**: at the first activation, 3 email templates in French and English (courtesy, reminder, formal notice) and 3 levels (3 days before the due date, 15 days after with one email per customer, 30 days after by hand).
@@ -48,7 +49,7 @@ After an update of the module, disable it and enable it again: the new templates
    - `__DUNNING_PENALTIES__`, `__DUNNING_INDEMNITY__`, `__DUNNING_TOTAL_WITH_PENALTIES__`: late penalties, recovery indemnity and total with them
    - `__DUNNING_PENALTIES_TEXT__`: a sentence quoting the penalties and the indemnity due, empty when nothing is due
    - the usual keys (`__REF__`, `__ONLINE_PAYMENT_URL__`...) work too, but in an email with several invoices only the `__DUNNING_*__` keys describe all of them.
-2. Setup of the module: one line per level, and the tag of the customers never reminded.
+2. Setup of the module: one line per level (with "Formal notice" to attach the PDF to its email), and the tag of the customers never reminded.
 3. Late penalties (optional): the annual rate (in France, by default the rate of the European Central Bank plus 10 points: 12.40% in the second half of 2026, at least 3 times the legal interest rate; it changes every half-year, see [service-public.fr](https://entreprendre.service-public.gouv.fr/vosdroits/F23211)), the fixed recovery indemnity (40 in France, once per late invoice), and a tag of the customers who never owe them. Only the customers recognized as companies by Dolibarr (VAT number or professional id) owe penalties. They are shown, never added to the invoice: the button of the tab prepares a separate draft invoice to check and validate.
 4. To send automatically: enable the job "Send reminders of unpaid customer invoices" in Home > Admin Tools > Scheduled jobs, and keep the reminder job of Dolibarr disabled.
 

@@ -1,5 +1,10 @@
 # CHANGELOG MODULE DUNNING FOR [DOLIBARR ERP CRM](https://www.dolibarr.org)
 
+## 1.2.0
+
+- Payment promise with an amount, shown kept, pending or not kept according to the payments received since the promise.
+- Formal notice to pay (PDF), a document model of the thirdparties: the late invoices of the customer, the penalties due and the bank details. A level can attach it to its email; the default level "Formal notice" does.
+
 ## 1.1.0
 
 - Ready to use: 3 email templates in French and English and 3 default levels created at the first activation.

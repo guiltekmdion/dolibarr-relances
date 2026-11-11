@@ -82,7 +82,7 @@ class modDunning extends DolibarrModules
 		$this->editor_squarred_logo = '';					// Must be image filename into the module/img directory followed with @modulename. Example: 'myimage.png@dunning'
 
 		// Possible values for version are: 'development', 'experimental', 'dolibarr', 'dolibarr_deprecated', 'experimental_deprecated' or a version string like 'x.y.z'
-		$this->version = '1.1.0';
+		$this->version = '1.2.0';
 		// Url to the file with your last numberversion of this module
 		//$this->url_last_version = 'http://www.example.com/versionmodule.txt';
 
@@ -122,7 +122,7 @@ class modDunning extends DolibarrModules
 			// Set this to 1 if module has its own barcode directory (core/modules/barcode)
 			'barcode' => 0,
 			// Set this to 1 if module has its own models directory (core/modules/xxx)
-			'models' => 0,
+			'models' => 1,	// Formal notice of a customer, a document model of the thirdparties (core/modules/societe/doc)
 			// Set this to 1 if module has its own printing directory (core/modules/printing)
 			'printing' => 0,
 			// Set this to 1 if module has its own theme directory (theme)
@@ -560,6 +560,10 @@ class modDunning extends DolibarrModules
 			}
 		}
 
+		// The formal notice in the document models of the thirdparties
+		$sql[] = "DELETE FROM ".$this->db->prefix()."document_model WHERE nom = 'dunningnotice' AND type = 'company' AND entity = ".((int) $conf->entity);
+		$sql[] = "INSERT INTO ".$this->db->prefix()."document_model (nom, type, entity) VALUES ('dunningnotice', 'company', ".((int) $conf->entity).")";
+
 		return $this->_init($sql, $options);
 	}
 
@@ -573,7 +577,9 @@ class modDunning extends DolibarrModules
 	 */
 	public function remove($options = '')
 	{
-		$sql = array();
+		global $conf;
+
+		$sql = array("DELETE FROM ".$this->db->prefix()."document_model WHERE nom = 'dunningnotice' AND type = 'company' AND entity = ".((int) $conf->entity));
 		return $this->_remove($sql, $options);
 	}
 }

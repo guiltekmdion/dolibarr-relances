@@ -111,7 +111,7 @@ class Dunning
 	 */
 	public function fetchLevels()
 	{
-		$sql = "SELECT l.rowid, l.label, l.nbdays, l.fk_c_type_contact, l.percustomer, l.byhand, l.fk_email_template, l.active, t.label as template_label";
+		$sql = "SELECT l.rowid, l.label, l.nbdays, l.fk_c_type_contact, l.percustomer, l.byhand, l.joinnotice, l.fk_email_template, l.active, t.label as template_label";
 		$sql .= " FROM ".$this->db->prefix()."dunning_level as l";
 		$sql .= " LEFT JOIN ".$this->db->prefix()."c_email_templates as t ON t.rowid = l.fk_email_template";
 		$sql .= " WHERE l.entity IN (".getEntity('dunning').")";
@@ -124,7 +124,7 @@ class Dunning
 		}
 		$levels = array();
 		while ($obj = $this->db->fetch_object($resql)) {
-			foreach (array('rowid', 'nbdays', 'fk_c_type_contact', 'percustomer', 'byhand', 'fk_email_template', 'active') as $field) {
+			foreach (array('rowid', 'nbdays', 'fk_c_type_contact', 'percustomer', 'byhand', 'joinnotice', 'fk_email_template', 'active') as $field) {
 				$obj->$field = (int) $obj->$field;
 			}
 			$obj->template_label = (string) $obj->template_label;
@@ -138,7 +138,7 @@ class Dunning
 	 * Create or update a level of the invoices. A level is never deleted but disabled: the events of its reminders keep its rowid.
 	 *
 	 * @param	User	$user		User saving, must be an administrator
-	 * @param	array{rowid:int,label:string,nbdays:int,fk_c_type_contact:int,percustomer:int,byhand?:int,fk_email_template:int,active:int}	$level	Values of the level, rowid 0 to create it
+	 * @param	array{rowid:int,label:string,nbdays:int,fk_c_type_contact:int,percustomer:int,byhand?:int,joinnotice?:int,fk_email_template:int,active:int}	$level	Values of the level, rowid 0 to create it
 	 * @return	int		Rowid of the level if OK, <0 if KO
 	 * @see fetchLevels()
 	 */
@@ -162,6 +162,7 @@ class Dunning
 			'fk_c_type_contact' => (int) $level['fk_c_type_contact'],
 			'percustomer' => (int) $level['percustomer'],
 			'byhand' => (int) ($level['byhand'] ?? 0),
+			'joinnotice' => (int) ($level['joinnotice'] ?? 0),
 			'fk_email_template' => (int) $level['fk_email_template'],
 			'active' => (int) $level['active'],
 		);
@@ -343,23 +344,76 @@ class Dunning
 		}
 		$sent = array();
 		$promise = array();
+		$promiseamount = array();
 		foreach ($events as $event) {	// In the order they were recorded: the last one wins
 			$reg = array();
 			if ($event->code == self::CODE_PROMISE) {
 				$promise[$event->fk_element] = $event->datep;
+				$promiseamount[$event->fk_element] = array((float) (json_decode((string) $event->extraparams, true)['amount'] ?? 0), $event->datec);
 			} elseif ($event->code == self::CODE_PENALTY_INVOICE) {
 				$rows[$event->fk_element]['penaltyinvoice'] = (int) (json_decode((string) $event->extraparams, true)['invoice'] ?? 0);
 			} elseif (preg_match('/^'.self::CODE_PREFIX.'(\d+)'.self::CODE_SENT_SUFFIX.'$/', $event->code, $reg)) {
 				$sent[$event->fk_element][(int) $reg[1]] = $event->datep;
 			}
 		}
+		$promisestatus = $this->getPromiseStatus($promise, $promiseamount, $today);
+		if (!is_array($promisestatus)) {
+			return -1;
+		}
 		$result = array();
 		foreach ($rows as $id => $row) {
 			$state = $this->computeState($levels, $row['refdate'], $sent[$id] ?? array(), $promise[$id] ?? 0, $startdate, $today);
-			$result[$id] = (object) array_merge($row, (array) $state, array('promise' => $promise[$id] ?? 0, 'due' => ($state->next && $state->nextdate <= $today)));
+			$result[$id] = (object) array_merge($row, (array) $state, array('promise' => $promise[$id] ?? 0, 'due' => ($state->next && $state->nextdate <= $today),
+				'promiseamount' => ($promiseamount[$id][0] ?? 0.0), 'promisestatus' => ($promisestatus[$id] ?? '')));
 		}
 
 		return $result;
+	}
+
+	/**
+	 * State of the promises with an amount: kept when the payments received between the promise and the end of the promised day reach it,
+	 * not kept when the promised day is over without them, pending before
+	 *
+	 * @param	array<int,int>					$promise		Promised day by invoice
+	 * @param	array<int,array{0:float,1:int}>	$promiseamount	Amount promised and date of the promise by invoice
+	 * @param	int								$today			First hour of the day of the reading
+	 * @return	array<int,string>|int<-1,-1>	'kept', 'notkept' or 'pending' by invoice with a promised amount, -1 if error
+	 */
+	private function getPromiseStatus(array $promise, array $promiseamount, $today)
+	{
+		$ids = array();
+		foreach ($promiseamount as $id => $info) {
+			if ($info[0] > 0) {
+				$ids[] = $id;
+			}
+		}
+		if (empty($ids)) {
+			return array();
+		}
+		$sql = "SELECT pf.fk_facture, p.datep, pf.amount FROM ".$this->db->prefix()."paiement_facture as pf";
+		$sql .= " INNER JOIN ".$this->db->prefix()."paiement as p ON p.rowid = pf.fk_paiement";
+		$sql .= " WHERE pf.fk_facture IN (".$this->db->sanitize(implode(',', $ids)).")";
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+		$paid = array();
+		while ($obj = $this->db->fetch_object($resql)) {
+			$id = (int) $obj->fk_facture;
+			$datep = (int) $this->db->jdate($obj->datep);
+			$end = dol_time_plus_duree(dol_get_first_hour($promise[$id]), 1, 'd', 0, 'tzserver');
+			if ($datep >= dol_get_first_hour($promiseamount[$id][1]) && $datep < $end) {
+				$paid[$id] = ($paid[$id] ?? 0) + (float) $obj->amount;
+			}
+		}
+		$status = array();
+		foreach ($ids as $id) {
+			$kept = ((float) price2num($paid[$id] ?? 0, 'MT') >= $promiseamount[$id][0]);
+			$status[$id] = ($kept ? 'kept' : ($today > dol_get_first_hour($promise[$id]) ? 'notkept' : 'pending'));
+		}
+
+		return $status;
 	}
 
 	/**
@@ -370,7 +424,7 @@ class Dunning
 	 * @param	int		$now		Date of the reading
 	 * @param	int		$saleid		Only the customers of this sales representative
 	 * @param	int		$dueonly	1 = only the customers with a reminder to send
-	 * @return	array<int,array{socid:int,socname:string,nb:int,remain:float,late30:float,level:?stdClass,leveldate:int,promise:int,next:?stdClass,nextdate:int,due:bool,byhand:bool}>|int<-1,-1>	Customers by id, -1 if error
+	 * @return	array<int,array{socid:int,socname:string,nb:int,remain:float,late30:float,level:?stdClass,leveldate:int,promise:int,promisestatus:string,next:?stdClass,nextdate:int,due:bool,byhand:bool}>|int<-1,-1>	Customers by id, -1 if error
 	 */
 	public function getCustomers(User $user, $now, $saleid = 0, $dueonly = 0)
 	{
@@ -385,7 +439,7 @@ class Dunning
 				continue;
 			}
 			$customer = $customers[$row->socid] ?? array('socid' => $row->socid, 'socname' => $row->socname, 'nb' => 0, 'remain' => 0.0, 'late30' => 0.0,
-				'level' => null, 'leveldate' => 0, 'promise' => 0, 'next' => null, 'nextdate' => 0, 'due' => false, 'byhand' => false);
+				'level' => null, 'leveldate' => 0, 'promise' => 0, 'promisestatus' => '', 'next' => null, 'nextdate' => 0, 'due' => false, 'byhand' => false);
 			$customer['nb']++;
 			$customer['remain'] += $row->remain;
 			$customer['late30'] += ($row->refdate < $late30 ? $row->remain : 0);
@@ -398,6 +452,12 @@ class Dunning
 				$customer['nextdate'] = $row->nextdate;
 			}
 			$customer['promise'] = max($customer['promise'], $row->promise);
+			foreach (array('notkept', 'pending', 'kept') as $status) {	// The worst state of the promises of the customer
+				if ($row->promisestatus == $status || $customer['promisestatus'] == $status) {
+					$customer['promisestatus'] = $status;
+					break;
+				}
+			}
 			$customer['due'] = ($customer['due'] || $row->due);
 			$customer['byhand'] = ($customer['byhand'] || ($row->due && !$row->auto));
 			$customers[$row->socid] = $customer;
@@ -460,7 +520,7 @@ class Dunning
 		if (empty($invoiceids)) {
 			return array();
 		}
-		$sql = "SELECT a.id, a.fk_element, a.code, a.label, a.datep, a.email_to, a.extraparams";
+		$sql = "SELECT a.id, a.fk_element, a.code, a.label, a.datep, a.datec, a.email_to, a.extraparams";
 		$sql .= " FROM ".$this->db->prefix()."actioncomm as a";
 		$sql .= " WHERE a.entity IN (".getEntity('agenda').") AND a.elementtype = 'invoice'";
 		$sql .= " AND a.fk_element IN (".$this->db->sanitize(implode(',', array_map('intval', $invoiceids))).")";
@@ -476,6 +536,7 @@ class Dunning
 		while ($obj = $this->db->fetch_object($resql)) {
 			$obj->fk_element = (int) $obj->fk_element;
 			$obj->datep = (int) $this->db->jdate($obj->datep);
+			$obj->datec = (int) $this->db->jdate($obj->datec);
 			$events[] = $obj;
 		}
 
@@ -587,7 +648,7 @@ class Dunning
 		$withpenalties = ($penalties + $indemnity > 0);	// A column only when something is due
 		$table = '<table border="1" cellpadding="4" style="border-collapse: collapse"><tr><th>'.$outputlangs->trans('Ref').'</th><th>'.$outputlangs->trans('DateDue').'</th>';
 		$table .= '<th>'.$outputlangs->trans('Late').'</th><th>'.$outputlangs->trans('AmountTTC').'</th><th>'.$outputlangs->trans('AlreadyPaid').'</th><th>'.$outputlangs->trans('RemainderToPay').'</th>';
-		$table .= ($withpenalties ? '<th>'.$outputlangs->trans('DunningPenalties').'</th>' : '').'</tr>';
+		$table .= ($withpenalties ? '<th>'.$outputlangs->trans('DunningPenaltiesColumn').'</th>' : '').'</tr>';
 		foreach ($group as $key => $row) {
 			$table .= '<tr><td><a href="'.dolPrintHTMLForAttributeUrl(getOnlinePaymentUrl(0, 'invoice', $row->ref)).'">'.dolPrintLabel($row->ref).'</a></td>';
 			$table .= '<td>'.dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs).'</td><td style="text-align: right">'.$amounts[$key]['days'].'</td>';
@@ -892,6 +953,18 @@ class Dunning
 			}
 		}
 
+		if ($level->joinnotice) {	// The formal notice of the customer, generated now with its late invoices
+			dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningnotice.modules.php');
+			$notice = new pdf_dunningnotice($this->db);
+			if ($notice->write_file($invoice->thirdparty, $outputlangs) <= 0) {
+				$this->errors[] = $refs.': '.$notice->error;
+				return 0;
+			}
+			$files[] = $notice->result['fullpath'];
+			$mimes[] = 'application/pdf';
+			$names[] = dol_basename($notice->result['fullpath']);
+		}
+
 		$errorsto = getDolGlobalString('MAIN_MAIL_ERRORS_TO');
 		$trackid = (count($group) > 1 ? 'thi'.$first->socid : 'inv'.$first->id);
 		$mail = new CMailFile($topic, $to, $from, $content, $files, $mimes, $names, $tpl->email_tocc, $tpl->email_tobcc, 0, 1, $errorsto, '', $trackid, '', 'standard');
@@ -943,9 +1016,10 @@ class Dunning
 	 * @param	array<int,stdClass>	$rows	Invoices as returned by getInvoices()
 	 * @param	int					$date	Promised day
 	 * @param	string				$note	Note of the promise
+	 * @param	float				$amount	Amount promised for one invoice, 0 if none: the promise is then kept or not by the payments
 	 * @return	int					Number of events created, <0 if KO
 	 */
-	public function addPromise(User $user, array $rows, $date, $note)
+	public function addPromise(User $user, array $rows, $date, $note, $amount = 0.0)
 	{
 		global $langs;
 
@@ -966,6 +1040,9 @@ class Dunning
 			$event->code = self::CODE_PROMISE;
 			$event->label = $langs->transnoentities('DunningPromiseLabel', dol_print_date($date, 'day'));
 			$event->note_private = $note;
+			if ($amount > 0) {
+				$event->extraparams = array('amount' => (string) price2num($amount, 'MT'));
+			}
 			$event->datep = $date;
 			$event->datef = $date;
 			$event->fulldayevent = 1;
@@ -1200,9 +1277,9 @@ class Dunning
 			$billing = (int) $obj->billing;
 		}
 		$defaults = array(
-			array('Relances - 1 Courtoisie / Courtesy', -3, 'DunningDefaultLevelCourtesy', 0, 0),
-			array('Relances - 2 Relance / Reminder', 15, 'DunningDefaultLevelReminder', 1, 0),
-			array('Relances - 3 Mise en demeure / Formal notice', 30, 'DunningDefaultLevelNotice', 1, 1),
+			array('Relances - 1 Courtoisie / Courtesy', -3, 'DunningDefaultLevelCourtesy', 0, 0, 0),
+			array('Relances - 2 Relance / Reminder', 15, 'DunningDefaultLevelReminder', 1, 0, 0),
+			array('Relances - 3 Mise en demeure / Formal notice', 30, 'DunningDefaultLevelNotice', 1, 1, 1),
 		);
 		$nb = 0;
 		foreach ($defaults as $default) {
@@ -1210,7 +1287,7 @@ class Dunning
 				continue;
 			}
 			$level = array('rowid' => 0, 'label' => $langs->transnoentitiesnoconv($default[2]), 'nbdays' => $default[1], 'fk_c_type_contact' => $billing,
-				'percustomer' => $default[3], 'byhand' => $default[4], 'fk_email_template' => $templates[$default[0]], 'active' => 1);
+				'percustomer' => $default[3], 'byhand' => $default[4], 'joinnotice' => $default[5], 'fk_email_template' => $templates[$default[0]], 'active' => 1);
 			if ($this->saveLevel($user, $level) < 0) {
 				return -1;
 			}
