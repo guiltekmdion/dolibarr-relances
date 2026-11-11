@@ -336,7 +336,7 @@ class Dunning
 					'last_main_doc' => (string) $obj->last_main_doc, 'refdate' => $refdate, 'total_ttc' => (float) $obj->total_ttc, 'paid' => $paid, 'remain' => $remain,
 					'penaltysubject' => (!$obj->nopenalty && ($companies[$obj->fk_soc] = ($companies[$obj->fk_soc] ?? $this->isACompany($obj)))), 'penaltyinvoice' => 0,
 					'currency' => $conf->currency, 'mc_rate' => 1.0, 'mc_total' => (float) $obj->total_ttc, 'mc_paid' => $paid, 'mc_remain' => $remain,
-					'installment' => 0, 'installments' => array());
+					'installment' => '', 'installments' => array());
 				if ($obj->multicurrency_code && $obj->multicurrency_code != $conf->currency && (float) $obj->multicurrency_tx > 0) {	// Amounts in the currency of the invoice
 					$rows[(int) $obj->rowid] = array_merge($rows[(int) $obj->rowid], array('currency' => $obj->multicurrency_code, 'mc_rate' => (float) $obj->multicurrency_tx,
 						'mc_total' => (float) $obj->multicurrency_total_ttc, 'mc_remainbefore' => round((float) $obj->total_ttc - $paid, $decimals)));
@@ -349,9 +349,10 @@ class Dunning
 		if (empty($rows)) {
 			return array();
 		}
-		if (isModEnabled('paymentschedule') && $this->applyInstallments($rows, $today, $decimals) < 0) {
-			return -1;
+		if (isModEnabled('installments')) {
+			$this->applyInstallments($rows, $today, $decimals);
 		}
+		$this->markPenaltyInvoices($rows);
 
 		$events = $this->getEvents(array_keys($rows));
 		if (!is_array($events)) {
@@ -367,8 +368,7 @@ class Dunning
 				$promiseamount[$event->fk_element] = array((float) (json_decode((string) $event->extraparams, true)['amount'] ?? 0), $event->datec);
 			} elseif ($event->code == self::CODE_PENALTY_INVOICE) {
 				$rows[$event->fk_element]['penaltyinvoice'] = (int) (json_decode((string) $event->extraparams, true)['invoice'] ?? 0);
-			} elseif (preg_match('/^'.self::CODE_PREFIX.'(\d+)'.self::CODE_SENT_SUFFIX.'$/', $event->code, $reg)
-				&& (int) (json_decode((string) $event->extraparams, true)['installment'] ?? 0) == $rows[$event->fk_element]['installment']) {	// The levels of the installment reminded
+			} elseif (preg_match('/^'.self::CODE_PREFIX.'(\d+)'.self::CODE_SENT_SUFFIX.'$/', $event->code, $reg) && $this->isSameInstallment($event, $rows[$event->fk_element]['installment'])) {
 				$sent[$event->fk_element][(int) $reg[1]] = $event->datep;
 			}
 		}
@@ -438,19 +438,21 @@ class Dunning
 	 * @param	array<int,array<string,mixed>>	$rows		Invoices being read by getInvoices(), changed in place
 	 * @param	int								$today		First hour of the day of the reading
 	 * @param	int								$decimals	Decimals of the totals
-	 * @return	int											0 if OK, -1 if error
+	 * An installment is known by its due date: the module Echeances writes its lines again at each change of the schedule.
+	 * If its tables can not be read, the invoices are reminded as a whole.
+	 *
+	 * @return	int											0 if OK, -1 if the schedules could not be read (logged)
 	 */
 	private function applyInstallments(array &$rows, $today, $decimals)
 	{
-		$sql = "SELECT s.fk_element, l.rowid, l.date_due, l.amount FROM ".$this->db->prefix()."paymentschedule_line as l";
-		$sql .= " INNER JOIN ".$this->db->prefix()."paymentschedule as s ON s.rowid = l.fk_schedule";
+		$sql = "SELECT s.fk_element, l.date_due, l.amount FROM ".$this->db->prefix()."installments_line as l";
+		$sql .= " INNER JOIN ".$this->db->prefix()."installments_schedule as s ON s.rowid = l.fk_schedule";
 		$sql .= " WHERE s.element = 'facture' AND s.billing = 0 AND l.status <> 9";	// 9: installment abandoned
 		$sql .= " AND s.fk_element IN (".$this->db->sanitize(implode(',', array_map('intval', array_keys($rows)))).")";
 		$sql .= $this->db->order('s.fk_element,l.date_due,l.rang,l.rowid', 'ASC,ASC,ASC,ASC');
 		$resql = $this->db->query($sql);
 		if (!$resql) {
-			$this->error = $this->db->lasterror();
-			dol_syslog(__METHOD__.' '.$this->error, LOG_ERR);
+			dol_syslog(__METHOD__.' '.$this->db->lasterror(), LOG_WARNING);
 			return -1;
 		}
 		$unpaid = array();
@@ -461,7 +463,7 @@ class Dunning
 			$paid = min((float) $obj->amount, max(0.0, $left[$id]));
 			$left[$id] -= $paid;
 			if (round((float) $obj->amount - $paid, $decimals) > 0) {
-				$unpaid[$id][] = array((int) $obj->rowid, dol_get_first_hour((int) $this->db->jdate($obj->date_due)), round((float) $obj->amount - $paid, $decimals), (float) $obj->amount);
+				$unpaid[$id][] = array(substr((string) $obj->date_due, 0, 10), dol_get_first_hour((int) $this->db->jdate($obj->date_due)), round((float) $obj->amount - $paid, $decimals), (float) $obj->amount);
 			}
 		}
 		foreach ($unpaid as $id => $installments) {
@@ -513,6 +515,36 @@ class Dunning
 		}
 
 		return 0;
+	}
+
+	/**
+	 * The invoices of penalties made by the module owe no penalties themselves: an event on their invoice of origin keeps their id
+	 *
+	 * @param	array<int,array<string,mixed>>	$rows	Invoices being read by getInvoices(), changed in place
+	 * @return	void
+	 */
+	private function markPenaltyInvoices(array &$rows)
+	{
+		$sql = "SELECT extraparams FROM ".$this->db->prefix()."actioncomm WHERE code = '".$this->db->escape(self::CODE_PENALTY_INVOICE)."' AND entity IN (".getEntity('agenda').")";
+		$resql = $this->db->query($sql);
+		while ($resql && ($obj = $this->db->fetch_object($resql))) {
+			$id = (int) (json_decode((string) $obj->extraparams, true)['invoice'] ?? 0);
+			if (isset($rows[$id])) {
+				$rows[$id]['penaltysubject'] = false;
+			}
+		}
+	}
+
+	/**
+	 * Tell if a reminder sent is one of an installment: without installment (no schedule, module Echeances disabled), all reminders count
+	 *
+	 * @param	stdClass	$event			Event of a reminder sent
+	 * @param	string		$installment	Due date of the installment reminded (Y-m-d), '' for the whole invoice
+	 * @return	bool						True if the event counts for it
+	 */
+	private function isSameInstallment(stdClass $event, $installment)
+	{
+		return $installment === '' || (string) (json_decode((string) $event->extraparams, true)['installment'] ?? '') === $installment;
 	}
 
 	/**
@@ -756,9 +788,10 @@ class Dunning
 		$key = $level->rowid.'_'.($bylang ? $outputlangs->defaultlang : 'level');
 		if (!isset($this->templates[$key])) {
 			$formmail = new FormMail($this->db);
-			$tpl = ($bylang ? $formmail->getEMailTemplate($this->db, 'facture_send', $user, $outputlangs, -2, 1, $level->template_label) : -1);
+			$public = new User($this->db);	// No user: the public templates only, never the private one of the user sending
+			$tpl = ($bylang ? $formmail->getEMailTemplate($this->db, 'facture_send', $public, $outputlangs, -2, 1, $level->template_label) : -1);
 			if (!is_object($tpl)) {
-				$tpl = $formmail->getEMailTemplate($this->db, 'facture_send', $user, $outputlangs, $level->fk_email_template);
+				$tpl = $formmail->getEMailTemplate($this->db, 'facture_send', $public, $outputlangs, $level->fk_email_template);
 			}
 			$this->templates[$key] = ((is_object($tpl) && $tpl->id > 0) ? $tpl : -1);	// An unknown id gives the generic text "send invoice" without id
 		}
@@ -794,7 +827,7 @@ class Dunning
 		$table .= '<th>'.$outputlangs->trans('Late').'</th><th>'.$outputlangs->trans('AmountTTC').'</th><th>'.$outputlangs->trans('AlreadyPaid').'</th><th>'.$outputlangs->trans('RemainderToPay').'</th>';
 		$table .= ($withpenalties ? '<th>'.$outputlangs->trans('DunningPenaltiesColumn').'</th>' : '').'</tr>';
 		foreach ($group as $key => $row) {
-			$installment = !empty($row->installment);	// Payment schedule: the installments reminded, not the whole invoice
+			$installment = ($row->installment !== '');	// Payment schedule: the installments reminded, not the whole invoice
 			$table .= '<tr><td><a href="'.dolPrintHTMLForAttributeUrl(getOnlinePaymentUrl(0, 'invoice', $row->ref)).'">'.dolPrintLabel($row->ref).'</a>';
 			$table .= ($installment ? '<br>'.dolPrintLabel($outputlangs->transnoentitiesnoconv('DunningInstallmentOf', dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs))) : '').'</td>';
 			$table .= '<td>'.dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs).'</td><td style="text-align: right">'.$amounts[$key]['days'].'</td>';
@@ -918,7 +951,7 @@ class Dunning
 	{
 		$days = $this->daysLate($row->refdate, $now);
 		$result = array('days' => $days, 'penalties' => 0.0, 'indemnity' => 0.0);
-		if ($days > 0 && $row->penaltysubject) {
+		if ($days > 0 && $row->penaltysubject && empty($row->penaltyinvoice)) {	// Once invoiced, the penalties are asked by their own invoice
 			$penalties = 0.0;
 			foreach (empty($row->installments) ? array(array($row->refdate, $row->remain)) : $row->installments as $part) {	// With a payment schedule: each late installment from its date
 				$penalties += $part[1] * $this->getSetupNumber('DUNNING_PENALTY_RATE') / 100 * $this->daysLate($part[0], $now) / 365;
@@ -1042,13 +1075,15 @@ class Dunning
 		}
 		$alreadysent = array();
 		foreach ($events as $event) {
-			if ($event->code == $sentcode) {
-				$alreadysent[$event->fk_element][(int) (json_decode((string) $event->extraparams, true)['installment'] ?? 0)] = 1;
+			foreach ($group as $row) {
+				if ($event->code == $sentcode && $event->fk_element == $row->id && $this->isSameInstallment($event, $row->installment)) {
+					$alreadysent[$row->id] = 1;
+				}
 			}
 		}
 		$tosend = array();
 		foreach ($group as $row) {
-			if (empty($alreadysent[$row->id][$row->installment])) {
+			if (empty($alreadysent[$row->id])) {
 				$tosend[] = $row;
 			}
 		}
@@ -1077,7 +1112,7 @@ class Dunning
 		$tpl = $this->getTemplate($level, $outputlangs, $user, (bool) $first->default_lang);
 		if (!is_object($tpl)) {
 			$langs->load('errors');
-			$this->errors[] = $refs.': '.$langs->trans('ErrorFailedToFindEmailTemplate', $level->template_label);
+			$this->errors[] = $refs.': '.dolPrintLabel($langs->transnoentitiesnoconv('ErrorFailedToFindEmailTemplate', $level->template_label));
 			return 0;
 		}
 		if (!$first->default_lang && !empty($tpl->lang) && $tpl->lang != $outputlangs->defaultlang) {	// The table of the invoices in the language of the template
@@ -1131,7 +1166,7 @@ class Dunning
 					$names[] = dol_basename($file);
 				} else {
 					$langs->load('errors');
-					$this->output .= "\n".$row->ref.': '.$langs->trans('ErrorFileNotFound', $row->last_main_doc);
+					$this->output .= "\n".$row->ref.': '.dolPrintLabel($langs->transnoentitiesnoconv('ErrorFileNotFound', $row->last_main_doc));
 				}
 			}
 		}
@@ -1165,7 +1200,7 @@ class Dunning
 			$event->type_code = 'AC_OTH_AUTO';
 			$event->code = $sentcode;
 			$event->label = $langs->transnoentities('DunningEventLabel', $level->label);
-			$event->extraparams = ($row->installment ? array('installment' => $row->installment) : null);	// Encoded by ActionComm::create()
+			$event->extraparams = ($row->installment !== '' ? array('installment' => $row->installment) : null);	// Encoded by ActionComm::create()
 			$event->note_private = $content;
 			$event->socid = $row->socid;
 			$event->fk_project = $row->fk_projet;
@@ -1183,7 +1218,7 @@ class Dunning
 			$event->errors_to = $errorsto;
 			if ($event->create($user) < 0) {
 				$this->db->rollback();
-				$this->errors[] = $refs.': '.$langs->trans('DunningErrorNotRecorded', $event->error);
+				$this->errors[] = $refs.': '.dolPrintLabel($langs->transnoentitiesnoconv('DunningErrorNotRecorded', $event->error));
 				dol_syslog(__METHOD__.' '.$refs.' sent but not recorded: '.$event->error, LOG_ERR);
 				return count($group);
 			}

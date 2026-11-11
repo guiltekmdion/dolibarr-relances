@@ -530,13 +530,14 @@ class modDunning extends DolibarrModules
 		//$result4=$extrafields->addExtraField('dunning_myattr4', "New Attr 4 label", 'select',  1,  3, 'thirdparty',   0, 1, '', array('options'=>array('code1'=>'Val1','code2'=>'Val2','code3'=>'Val3')), 1,'', -1, 0, '', '', 'dunning@dunning', 'isModEnabled("dunning")');
 		//$result5=$extrafields->addExtraField('dunning_myattr5', "New Attr 5 label", 'text',    1, 10, 'user',         0, 0, '', '', 1, '', -1, 0, '', '', 'dunning@dunning', 'isModEnabled("dunning")');
 
-		// The email templates that are not there yet, then the default levels on the first activation
+		// The email templates once (one deleted by the user does not come back), then the default levels on the first activation
 		dol_include_once('/dunning/class/dunning.class.php');
 		$dunning = new Dunning($this->db);
-		if ($dunning->initTemplates() < 0 || ($user instanceof User && $dunning->initDefaultLevels($user) < 0)) {	// No user when enabled from the command line
+		if ((!getDolGlobalInt('DUNNING_TEMPLATES_INIT') && $dunning->initTemplates() < 0) || ($user instanceof User && $dunning->initDefaultLevels($user) < 0)) {	// No user when enabled from the command line
 			$this->error = $dunning->error;
 			return -1;
 		}
+		dolibarr_set_const($this->db, 'DUNNING_TEMPLATES_INIT', '1', 'chaine', 0, '', $conf->entity);
 
 		// Permissions
 		$this->remove($options);

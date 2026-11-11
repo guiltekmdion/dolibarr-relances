@@ -143,7 +143,6 @@ $events = $dunning->getEvents(array($object->id));
 llxHeader('', $langs->trans('InvoiceCustomer').' - '.$langs->trans('Dunning'), '', '', 0, 0, '', '', '', 'mod-dunning page-card');
 
 $object->fetch_thirdparty();
-$object->totalpaid = $object->getSommePaiement();	// For the status shown by the banner
 $head = facture_prepare_head($object);
 print dol_get_fiche_head($head, 'dunning', $langs->trans('InvoiceCustomer'), -1, $object->picto);
 $linkback = '<a href="'.DOL_URL_ROOT.'/compta/facture/list.php?restore_lastsearch_values=1">'.$langs->trans('BackToList').'</a>';
@@ -180,7 +179,7 @@ if (!$row) {
 		print ' ('.($row->auto ? $langs->trans('Automatic') : $langs->trans('DunningByHand')).')</span>';
 	}
 	print '</td></tr>';
-	if ($row->installment) {	// Payment schedule of the module Echeances: the installment reminded
+	if ($row->installment !== '') {	// Payment schedule of the module Echeances: the installment reminded
 		print '<tr><td>'.$langs->trans('DunningInstallment').'</td><td>'.dol_print_date($row->refdate, 'day').' &nbsp; '.price($row->mc_remain, 0, $langs, 1, -1, -1, $row->currency).'</td></tr>';
 	}
 	print '<tr><td>'.$langs->trans('DunningPromise').'</td><td>'.($row->promise ? dol_print_date($row->promise, 'day') : '');

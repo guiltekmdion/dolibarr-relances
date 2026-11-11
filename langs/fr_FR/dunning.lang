@@ -13,12 +13,10 @@ ModuleDunningDesc = Relances des factures clients impayées, par niveaux
 # Admin page
 #
 DunningSetup = Configuration des relances
-Settings = Paramètres
 
 #
 # About page
 #
-About = À propos
 DunningAbout = À propos des relances
 DunningAboutPage = Page à propos des relances
 

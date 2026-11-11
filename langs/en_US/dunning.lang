@@ -13,12 +13,10 @@ ModuleDunningDesc = Send reminders of unpaid customer invoices by levels
 # Admin page
 #
 DunningSetup = Reminders setup
-Settings = Settings
 
 #
 # About page
 #
-About = About
 DunningAbout = About Reminders
 DunningAboutPage = Reminders about page
 
