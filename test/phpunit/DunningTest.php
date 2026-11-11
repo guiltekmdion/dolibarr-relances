@@ -176,7 +176,7 @@ class DunningTest extends CommonClassTest
 
 		$module = new modDunning($db);
 
-		$this->assertSame(array('1.3.1', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
+		$this->assertSame(array('1.3.2', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
 		$this->assertTrue((bool) $db->query("SELECT rowid FROM ".$db->prefix()."dunning_level"), 'Enabling the module creates its table: '.$db->lasterror());
 		$this->assertSame(0, $module->cronjobs[0]['status']);
 		$this->assertSame(array('DUNNING_START_DATE', 1), array($module->const[0][0], $module->const[0][6]), 'A module enabled again does not send the past');
@@ -879,6 +879,18 @@ class DunningTest extends CommonClassTest
 		$values = array();
 		dunning_completesubstitutionarray($values, $langs, $paid, array('mode' => 'formemail'));
 		$this->assertSame(array('', ''), array($values['__DUNNING_LEVEL__'], $values['__DUNNING_INVOICES__']), 'Not reminded: empty values');
+		$values = array();
+		$soc = new Societe($db);
+		$soc->fetch($socid);
+		dunning_completesubstitutionarray($values, $langs, $soc, array('mode' => 'formemail'));
+		$this->assertSame(array('', ''), array($values['__DUNNING_LEVEL__'], $values['__DUNNING_PENALTIES_TEXT__']), 'Another object: empty, not the descriptions');
+		$saveuser = $GLOBALS['user'];
+		$GLOBALS['user'] = clone $this->savuser;
+		$GLOBALS['user']->rights = (object) array('facture' => (object) array('lire' => 1));
+		$values = array();
+		dunning_completesubstitutionarray($values, $langs, $invoice, array('mode' => 'formemail'));
+		$GLOBALS['user'] = $saveuser;
+		$this->assertSame('', $values['__DUNNING_LEVEL__'], 'Without the right to read the reminders');
 	}
 
 	/**
@@ -978,6 +990,10 @@ class DunningTest extends CommonClassTest
 		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
 		$this->assertSame($penaltyid, $rows[$id]->penaltyinvoice);
 		$this->assertSame(-1, $dunning->createPenaltyInvoice($this->savuser, $rows[$id]), 'Once per invoice');
+		$this->assertGreaterThan(0, $penalty->delete($this->savuser), (string) $penalty->error);	// The user deletes the draft
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame(0, $rows[$id]->penaltyinvoice, 'The deleted invoice is forgotten');
+		$this->assertGreaterThan(0, $dunning->createPenaltyInvoice($this->savuser, $rows[$id]), 'It can be created again: '.$dunning->error);
 		$person = $this->createCustomer('nopenalty@example.com');
 		$other = $this->createInvoice($person, -30);
 		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($person));
@@ -1163,6 +1179,44 @@ class DunningTest extends CommonClassTest
 		$this->assertSame(4, array_sum(array_column($dunning->getStatistics($sales, $now - 60 * $day, $now)['months'], 'reminders')), 'Its customer');
 		$sales->socid = $socid;
 		$this->assertSame(-1, $dunning->getStatistics($sales, $now - 60 * $day, $now), 'Not for an external user');
+	}
+
+	/**
+	 * A customer without language gets the template chosen for the level and its language, whatever the language of the job;
+	 * a customer with a language gets the template of the same label in its language
+	 *
+	 * @return void
+	 */
+	public function testDunningTemplateNoLanguage()
+	{
+		global $conf;
+
+		$db = $this->savdb;
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree(dol_now(), -30, 'd', 0, 'tzserver');
+		$hook = $this->captureMails();
+		$ids = array();
+		foreach (array('fr_FR' => 'Relance FR', 'en_US' => 'Reminder EN') as $lang => $topic) {
+			$sql = "INSERT INTO ".$db->prefix()."c_email_templates (entity, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content)";
+			$sql .= " VALUES (1, 'facture_send', 0, '".$db->idate(dol_now())."', 'DUNNINGTEST nolang', '".$db->escape($lang)."', 990, '1', 1, '".$db->escape($topic)."', 0, '__DUNNING_INVOICES__')";
+			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+			$ids[$lang] = $db->last_insert_id($db->prefix().'c_email_templates');
+		}
+		$dunning = new Dunning($db);
+		$level = array('rowid' => 0, 'label' => 'DUNNINGTEST nolang', 'nbdays' => 0, 'fk_c_type_contact' => 0, 'percustomer' => 0, 'fk_email_template' => $ids['fr_FR'], 'active' => 1);
+		$this->assertGreaterThan(0, $dunning->saveLevel($this->savuser, $level), $dunning->error);
+		$none = $this->createCustomer('nolang@example.com');
+		$english = $this->createCustomer('english@example.com', 'en_US');
+		$this->createInvoice($none, -5);
+		$this->createInvoice($english, -5);
+
+		$this->assertSame(0, $dunning->sendReminders(), $dunning->error.implode(', ', $dunning->errors));	// The job runs in English
+		$mails = array();
+		foreach ($hook->mails as $i => $mail) {
+			$mails[explode('|', $mail)[0]] = $i;
+		}
+		$this->assertSame('nolang@example.com|Relance FR', $hook->mails[$mails['nolang@example.com']], 'The template of the level');
+		$this->assertStringContainsString('Reste à payer', html_entity_decode($hook->bodies[$mails['nolang@example.com']]), 'Its language for the table');
+		$this->assertSame('english@example.com|Reminder EN', $hook->mails[$mails['english@example.com']], 'The language of the customer');
 	}
 
 	/**

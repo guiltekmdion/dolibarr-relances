@@ -1,5 +1,12 @@
 # CHANGELOG MODULE DUNNING FOR [DOLIBARR ERP CRM](https://www.dolibarr.org)
 
+## 1.3.2
+
+- A customer without language gets the email template chosen for the level, in its language, whatever the language of the scheduled job.
+- The `__DUNNING_*__` keys are empty in the email forms other than the one of a reminded invoice (no description text in an email).
+- A penalty invoice deleted (a draft) can be created again.
+- README: disabling and enabling the module after an update is required.
+
 ## 1.3.1
 
 - Statistics: a sales representative without the right to see all customers only counts its customers, like the list; never for an external user.

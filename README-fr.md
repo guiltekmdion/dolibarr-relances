@@ -39,7 +39,7 @@ Dolibarr 24.0 ou plus, avec les modules Factures clients, Travaux planifiés et 
 2. Dans Dolibarr : Accueil > Configuration > Modules > Déployer/Installer un module externe, puis envoyer le zip. Ou le décompresser dans `htdocs/custom` (le dossier `dunning` doit être en `htdocs/custom/dunning`).
 3. Activer le module **Relances** (dans Modules financiers), puis donner les droits aux utilisateurs.
 
-Après une mise à jour du module, le désactiver puis le réactiver : les nouveaux modèles et réglages sont ajoutés, vos niveaux et vos modèles sont gardés.
+Après une mise à jour du module, le désactiver puis le réactiver : **obligatoire**, les pages du module sont en erreur tant que ce n'est pas fait. Les nouvelles colonnes, les modèles et les réglages sont ajoutés ; vos niveaux et vos modèles sont gardés.
 
 ## Configuration
 

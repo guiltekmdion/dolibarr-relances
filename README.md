@@ -39,7 +39,7 @@ Dolibarr 24.0 or later, with the modules Customer invoices, Scheduled jobs and A
 2. In Dolibarr: Home > Setup > Modules > Deploy/install external app/module, then send the zip. Or unzip it in `htdocs/custom` (the folder `dunning` must be at `htdocs/custom/dunning`).
 3. Enable the module **Reminders** (in Financial Modules), then give the rights to the users.
 
-After an update of the module, disable it and enable it again: the new templates and settings are added, your levels and templates are kept.
+After an update of the module, disable it and enable it again: **required**, the pages of the module fail until then. The new columns, templates and settings are added; your levels and templates are kept.
 
 ## Setup
 

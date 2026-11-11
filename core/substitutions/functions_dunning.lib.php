@@ -45,8 +45,8 @@ function dunning_completesubstitutionarray(&$substitutionarray, $outputlangs, $o
 	$keys = array('__DUNNING_LEVEL__' => 'DunningKeyLevel', '__DUNNING_DAYS_LATE__' => 'DunningKeyDaysLate', '__DUNNING_INVOICES__' => 'DunningKeyInvoices',
 		'__DUNNING_TOTAL_REMAIN__' => 'DunningKeyTotalRemain', '__DUNNING_PENALTIES__' => 'DunningKeyPenalties', '__DUNNING_INDEMNITY__' => 'DunningKeyIndemnity',
 		'__DUNNING_TOTAL_WITH_PENALTIES__' => 'DunningKeyTotalWithPenalties', '__DUNNING_PENALTIES_TEXT__' => 'DunningKeyPenaltiesText');
-	foreach ($keys as $key => $label) {
-		$substitutionarray[$key] = $outputlangs->trans($label);
+	foreach ($keys as $key => $label) {	// Their description in the editor of the templates, else empty unless an invoice gives the values
+		$substitutionarray[$key] = (is_object($object) ? '' : $outputlangs->trans($label));
 	}
 	if (!is_object($object) || $object->element != 'facture' || !$user->hasRight('dunning', 'read') || !$user->hasRight('facture', 'lire') || $user->socid > 0) {
 		return;

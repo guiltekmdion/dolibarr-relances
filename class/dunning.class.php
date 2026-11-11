@@ -367,6 +367,9 @@ class Dunning
 				$sent[$event->fk_element][(int) $reg[1]] = $event->datep;
 			}
 		}
+		if ($this->forgetDeletedPenaltyInvoices($rows) < 0) {
+			return -1;
+		}
 		$promisestatus = $this->getPromiseStatus($promise, $promiseamount, $today);
 		if (!is_array($promisestatus)) {
 			return -1;
@@ -417,6 +420,36 @@ class Dunning
 			// A retained warranty not due yet lowers the rest in the currency of the company: the same share in the currency of the invoice
 			$row['mc_remain'] = ($row['mc_remainbefore'] > 0 && $row['remain'] < $row['mc_remainbefore'] ? round($remain * $row['remain'] / $row['mc_remainbefore'], $decimals) : $remain);
 			unset($row['mc_remainbefore'], $row);
+		}
+
+		return 0;
+	}
+
+	/**
+	 * A penalty invoice deleted by a user (a draft) can be created again: its event stays in the agenda, but the invoice is gone
+	 *
+	 * @param	array<int,array<string,mixed>>	$rows	Invoices being read by getInvoices(), changed in place
+	 * @return	int										0 if OK, -1 if error
+	 */
+	private function forgetDeletedPenaltyInvoices(array &$rows)
+	{
+		$ids = array_filter(array_column($rows, 'penaltyinvoice'));
+		if (empty($ids)) {
+			return 0;
+		}
+		$resql = $this->db->query("SELECT rowid FROM ".$this->db->prefix()."facture WHERE rowid IN (".$this->db->sanitize(implode(',', array_map('intval', $ids))).")");
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+		$existing = array();
+		while ($obj = $this->db->fetch_object($resql)) {
+			$existing[(int) $obj->rowid] = 1;
+		}
+		foreach ($rows as $id => $row) {
+			if ($row['penaltyinvoice'] && empty($existing[$row['penaltyinvoice']])) {
+				$rows[$id]['penaltyinvoice'] = 0;
+			}
 		}
 
 		return 0;
@@ -655,14 +688,15 @@ class Dunning
 	 * @param	stdClass	$level			Level
 	 * @param	Translate	$outputlangs	Language of the thirdparty
 	 * @param	User		$user			User sending (private templates)
+	 * @param	bool		$bylang			False for a customer without language: the template chosen for the level, in its own language
 	 * @return	CEmailTemplate|ModelMail|int<-1,-1>	Template, -1 if not found (never the generic text of the core)
 	 */
-	public function getTemplate(stdClass $level, Translate $outputlangs, User $user)
+	public function getTemplate(stdClass $level, Translate $outputlangs, User $user, $bylang = true)
 	{
-		$key = $level->rowid.'_'.$outputlangs->defaultlang;
+		$key = $level->rowid.'_'.($bylang ? $outputlangs->defaultlang : 'level');
 		if (!isset($this->templates[$key])) {
 			$formmail = new FormMail($this->db);
-			$tpl = $formmail->getEMailTemplate($this->db, 'facture_send', $user, $outputlangs, -2, 1, $level->template_label);
+			$tpl = ($bylang ? $formmail->getEMailTemplate($this->db, 'facture_send', $user, $outputlangs, -2, 1, $level->template_label) : -1);
 			if (!is_object($tpl)) {
 				$tpl = $formmail->getEMailTemplate($this->db, 'facture_send', $user, $outputlangs, $level->fk_email_template);
 			}
@@ -973,11 +1007,17 @@ class Dunning
 			$outputlangs->loadLangs(array('main', 'bills', 'dunning@dunning'));
 		}
 
-		$tpl = $this->getTemplate($level, $outputlangs, $user);
+		// A customer without language gets the template of the level, not the language of the reader (a job runs in the default language)
+		$tpl = $this->getTemplate($level, $outputlangs, $user, (bool) $first->default_lang);
 		if (!is_object($tpl)) {
 			$langs->load('errors');
 			$this->errors[] = $refs.': '.$langs->trans('ErrorFailedToFindEmailTemplate', $level->template_label);
 			return 0;
+		}
+		if (!$first->default_lang && !empty($tpl->lang) && $tpl->lang != $outputlangs->defaultlang) {	// The table of the invoices in the language of the template
+			$outputlangs = new Translate('', $conf);
+			$outputlangs->setDefaultLang($tpl->lang);
+			$outputlangs->loadLangs(array('main', 'bills', 'dunning@dunning'));
 		}
 		$to = array();
 		foreach ($group as $row) {
