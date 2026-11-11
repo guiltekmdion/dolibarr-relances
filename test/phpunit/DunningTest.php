@@ -176,7 +176,7 @@ class DunningTest extends CommonClassTest
 
 		$module = new modDunning($db);
 
-		$this->assertSame(array('1.3.0', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
+		$this->assertSame(array('1.3.1', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
 		$this->assertTrue((bool) $db->query("SELECT rowid FROM ".$db->prefix()."dunning_level"), 'Enabling the module creates its table: '.$db->lasterror());
 		$this->assertSame(0, $module->cronjobs[0]['status']);
 		$this->assertSame(array('DUNNING_START_DATE', 1), array($module->const[0][0], $module->const[0][6]), 'A module enabled again does not send the past');
@@ -1156,6 +1156,13 @@ class DunningTest extends CommonClassTest
 		$reader = clone $this->savuser;
 		$reader->rights = (object) array('dunning' => (object) array('read' => 1));
 		$this->assertSame(-1, $dunning->getStatistics($reader, $now - 60 * $day, $now), 'Reading invoices is needed');
+		$sales = clone $this->savuser;
+		$sales->rights = (object) array('dunning' => (object) array('read' => 1), 'facture' => (object) array('lire' => 1));	// Not all customers
+		$this->assertSame(array('months' => array(), 'levels' => array()), $dunning->getStatistics($sales, $now - 60 * $day, $now), 'Only the customers of the sales representative');
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."societe_commerciaux (fk_soc, fk_user) VALUES (".((int) $socid).", ".((int) $sales->id).")"));
+		$this->assertSame(4, array_sum(array_column($dunning->getStatistics($sales, $now - 60 * $day, $now)['months'], 'reminders')), 'Its customer');
+		$sales->socid = $socid;
+		$this->assertSame(-1, $dunning->getStatistics($sales, $now - 60 * $day, $now), 'Not for an external user');
 	}
 
 	/**

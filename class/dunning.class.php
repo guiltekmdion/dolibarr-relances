@@ -1388,7 +1388,7 @@ class Dunning
 	{
 		global $langs;
 
-		if (!$user->hasRight('dunning', 'read') || !$user->hasRight('facture', 'lire')) {
+		if (!$user->hasRight('dunning', 'read') || !$user->hasRight('facture', 'lire') || $user->socid > 0) {
 			$this->error = $langs->trans('NotEnoughPermissions');
 			return -1;
 		}
@@ -1397,6 +1397,9 @@ class Dunning
 			return -1;
 		}
 		$where = " FROM ".$this->db->prefix()."actioncomm as a WHERE a.entity IN (".getEntity('agenda').") AND a.elementtype = 'invoice'";
+		if (!$user->hasRight('societe', 'client', 'voir')) {	// Like getInvoices(): a sales representative only counts its customers
+			$where .= " AND EXISTS (SELECT sc.fk_soc FROM ".$this->db->prefix()."societe_commerciaux as sc WHERE sc.fk_soc = a.fk_soc AND sc.fk_user = ".((int) $user->id).")";
+		}
 		$where .= " AND a.code LIKE '".$this->db->escape($this->db->escapeforlike(self::CODE_PREFIX))."%".$this->db->escape($this->db->escapeforlike(self::CODE_SENT_SUFFIX))."'";
 		$where .= " AND a.datep >= '".$this->db->idate($from)."' AND a.datep <= '".$this->db->idate($to)."'";
 		$queries = array(

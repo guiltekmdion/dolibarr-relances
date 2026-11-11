@@ -1,5 +1,9 @@
 # CHANGELOG MODULE DUNNING FOR [DOLIBARR ERP CRM](https://www.dolibarr.org)
 
+## 1.3.1
+
+- Statistics: a sales representative without the right to see all customers only counts its customers, like the list; never for an external user.
+
 ## 1.3.0
 
 - Statistics of the reminders: by month and by level, amount paid within 30 days after a reminder, average days from the first reminder to the full payment.
