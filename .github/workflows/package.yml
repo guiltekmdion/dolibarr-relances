@@ -1,0 +1,47 @@
+# Builds module_dunning-<version>.zip with the script of the ModuleBuilder (build/buildzip.php): the folder dunning/ inside, the
+# format of Home > Setup > Modules > Deploy/install external app/module. A tag vX.Y.Z, equal to the version of the descriptor,
+# publishes the zip in a GitHub release.
+name: Package
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the PHP syntax with PHP 7.2, the oldest version supported
+        run: docker run --rm -v "$PWD:/app" -w /app php:7.2-cli sh -c 'find . -name "*.php" -print0 | xargs -0 -n1 php -l'
+
+      - name: Build the zip
+        run: |
+          version=$(sed -n "s/.*\$this->version = '\([0-9.]*\)'.*/\1/p" core/modules/modDunning.class.php)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME differs from the version $version of the descriptor"; exit 1
+          fi
+          php build/buildzip.php
+          mkdir dist
+          mv "$(php -r 'echo sys_get_temp_dir();')/module_dunning-$version.zip" dist/
+          unzip -l "dist/module_dunning-$version.zip"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module_dunning-${{ env.VERSION }}
+          path: dist/*.zip
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip --title "Reminders $VERSION" \
+            --notes "Install: Home > Setup > Modules > Deploy/install external app/module, then send module_dunning-$VERSION.zip. Changes: see ChangeLog.md."

@@ -1,0 +1,58 @@
+# Translation file
+
+#
+# Generic
+#
+
+# Module label 'ModuleDunningName'
+ModuleDunningName = Relances
+# Module description 'ModuleDunningDesc'
+ModuleDunningDesc = Relances des factures clients impayées, par niveaux
+
+#
+# Admin page
+#
+DunningSetup = Configuration des relances
+Settings = Paramètres
+
+#
+# About page
+#
+About = À propos
+DunningAbout = À propos des relances
+DunningAboutPage = Page à propos des relances
+
+
+#
+# Reminders
+#
+Dunning=Relances
+DunningJob=Envoyer les relances des factures clients impayées
+DunningJobComment=Envoie le niveau de relance suivant des factures clients impayées (voir Facturation > Relances)
+DunningLevels=Niveaux de relance
+DunningNbDays=Jours après l'échéance
+DunningNbDaysHelp=Une valeur négative envoie la relance avant l'échéance
+DunningRecipient=Destinataire (type de contact, sinon email du tiers)
+DunningPerCustomer=Un email par client
+DunningExcludedCategory=Les clients de ce tag/catégorie ne sont jamais relancés
+DunningCoreJobEnabled=La tâche planifiée %s est activée : désactivez-la, sinon les relances partiraient deux fois.
+DunningErrorSameDays=Deux niveaux ne peuvent pas avoir le même nombre de jours. Pour échanger les jours de deux niveaux, enregistrez d'abord l'un des deux avec un nombre de jours libre.
+DunningKeysHelp=Clés des modèles d'email des niveaux : __DUNNING_LEVEL__ (nom du niveau), __DUNNING_DAYS_LATE__ (jours de retard de la facture la plus ancienne), __DUNNING_INVOICES__ (tableau des factures de l'email, avec les liens de paiement), __DUNNING_TOTAL_REMAIN__ (total restant à payer). Les clés habituelles comme __REF__ ou __ONLINE_PAYMENT_URL__ marchent aussi, mais dans un email de plusieurs factures, seules les clés __DUNNING_*__ les décrivent toutes.
+DunningLevelReached=Niveau atteint
+DunningNextReminder=Prochaine relance
+DunningByHand=envoi manuel
+DunningByHandHelp=La tâche planifiée n'envoie jamais ce niveau : la relance attend dans la liste des clients à relancer, pour être vérifiée et envoyée par un utilisateur
+DunningCustomersToRemind=Clients à relancer
+DunningLateMoreThan30Days=Plus de 30 jours de retard
+DunningNotReminded=Cette facture n'est pas relancée (payée, litige ouvert ou client exclu).
+ConfirmDunningRemindNow=Envoyer la relance %s à %s ?
+DunningSendSummary=Envoyer un email par client
+DunningPromise=Promesse de paiement
+DunningDoNotRemind=Ne pas relancer
+DunningConfirmMassAction=Appliquer cette action au(x) %s client(s) sélectionné(s) ?
+DunningPromiseLabel=Paiement promis pour le %s
+DunningEventLabel=Relance %s envoyée par email
+DunningEmailsSent=%s email(s) envoyé(s) pour %s facture(s)
+DunningErrorNotRecorded=L'email est parti mais son événement n'a pas été enregistré (%s) : cette relance pourrait repartir
+Permission231251=Lire les relances des factures impayées
+Permission231252=Envoyer les relances, enregistrer les promesses de paiement

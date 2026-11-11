@@ -5,38 +5,54 @@
 #
 
 # Module label 'ModuleDunningName'
-ModuleDunningName = Dunning
+ModuleDunningName = Reminders
 # Module description 'ModuleDunningDesc'
-ModuleDunningDesc = Dunning description
+ModuleDunningDesc = Send reminders of unpaid customer invoices by levels
 
 #
 # Admin page
 #
-DunningSetup = Dunning setup
+DunningSetup = Reminders setup
 Settings = Settings
-DunningSetupPage = Dunning setup page
-NewSection=New section
-DUNNING_MYPARAM1 = My param 1
-DUNNING_MYPARAM1Tooltip = My param 1 tooltip
-DUNNING_MYPARAM2=My param 2
-DUNNING_MYPARAM2Tooltip=My param 2 tooltip
-
 
 #
 # About page
 #
 About = About
-DunningAbout = About Dunning
-DunningAboutPage = Dunning about page
+DunningAbout = About Reminders
+DunningAboutPage = Reminders about page
+
 
 #
-# Sample page
+# Reminders
 #
-DunningArea = Home Dunning
-MyPageName = My page name
-
-#
-# Sample widget
-#
-MyWidget = My widget
-MyWidgetDescription = My widget description
+Dunning=Reminders
+DunningJob=Send reminders of unpaid customer invoices
+DunningJobComment=Send the next reminder level of unpaid customer invoices (see Billing > Reminders)
+DunningLevels=Reminder levels
+DunningNbDays=Days after the due date
+DunningNbDaysHelp=A negative value sends the reminder before the due date
+DunningRecipient=Recipient (contact type, else email of the thirdparty)
+DunningPerCustomer=One email per customer
+DunningExcludedCategory=Customers of this tag/category are never reminded
+DunningCoreJobEnabled=The scheduled job %s is enabled: disable it, or reminders would be sent twice.
+DunningErrorSameDays=Two levels can not have the same number of days. To swap the days of two levels, save one with a free number of days first.
+DunningKeysHelp=Keys for the email templates of the levels: __DUNNING_LEVEL__ (name of the level), __DUNNING_DAYS_LATE__ (days late of the oldest invoice), __DUNNING_INVOICES__ (table of the invoices of the email, with payment links), __DUNNING_TOTAL_REMAIN__ (total remaining unpaid). Usual keys such as __REF__ or __ONLINE_PAYMENT_URL__ also work, but in an email with several invoices only the __DUNNING_*__ keys describe all of them.
+DunningLevelReached=Level reached
+DunningNextReminder=Next reminder
+DunningByHand=by hand
+DunningByHandHelp=The scheduled job never sends this level: the reminder waits in the list of the customers to remind, to be checked and sent by a user
+DunningCustomersToRemind=Customers to remind
+DunningLateMoreThan30Days=Over 30 days late
+DunningNotReminded=This invoice is not reminded (paid, dispute open, or customer excluded).
+ConfirmDunningRemindNow=Send the reminder %s to %s ?
+DunningSendSummary=Send one email per customer
+DunningPromise=Payment promise
+DunningDoNotRemind=Do not remind
+DunningConfirmMassAction=Apply this action to the %s selected customer(s) ?
+DunningPromiseLabel=Payment promised for %s
+DunningEventLabel=Reminder %s sent by email
+DunningEmailsSent=%s email(s) sent for %s invoice(s)
+DunningErrorNotRecorded=The email was sent but its event was not recorded (%s): this reminder may be sent again
+Permission231251=Read reminders of unpaid invoices
+Permission231252=Send reminders, record payment promises

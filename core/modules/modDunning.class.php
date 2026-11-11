@@ -54,10 +54,10 @@ class modDunning extends DolibarrModules
 
 		// Family can be 'base' (core modules),'crm','financial','hr','projects','products','ecm','technic' (transverse modules),'interface' (link with external tools),'other','...'
 		// It is used to group modules by family in module setup page
-		$this->family = "other";
+		$this->family = "financial";
 
 		// Module position in the family on 2 digits ('01', '10', '20', ...)
-		$this->module_position = '90';
+		$this->module_position = '12';	// Just after Customer invoices
 
 		// Gives the possibility for the module, to provide his own family info and position of this family (Overwrite $this->family and $this->module_position. Avoid this)
 		//$this->familyinfo = array('myownfamily' => array('position' => '01', 'label' => $langs->trans("MyOwnFamily")));
@@ -66,9 +66,9 @@ class modDunning extends DolibarrModules
 
 		// DESCRIPTION_FLAG
 		// Module description, used if translation string 'ModuleDunningDesc' not found (Dunning is name of module).
-		$this->description = "DunningDescription";
+		$this->description = 'Reminders of unpaid customer invoices by levels';
 		// Used only if file README.md and README-LL.md not found.
-		$this->descriptionlong = "DunningDescription";
+		$this->descriptionlong = 'Reminders of unpaid customer invoices by levels';
 
 		// Enables the module for all entities (Multicompany)
 		// Can be enabled / disabled only from the main company with superadmin account
@@ -136,8 +136,7 @@ class modDunning extends DolibarrModules
 			// Set here all hooks context managed by module. To find available hook context, make a "grep -r '>initHooks(' *" on source code. You can also set hook context to 'all'
 			/* BEGIN MODULEBUILDER HOOKSCONTEXTS */
 			'hooks' => array(
-				// 'hookcontext1',
-				// 'hookcontext2',
+				'index',	// Line of the customers to remind on the dashboard of the home page
 			),
 			/* END MODULEBUILDER HOOKSCONTEXTS */
 			// Set this to 1 if features of module are opened to external users
@@ -150,7 +149,7 @@ class modDunning extends DolibarrModules
 
 		// Data directories to create when module is enabled.
 		// Example: this->dirs = array("/dunning/temp","/dunning/subdir");
-		$this->dirs = array("/dunning/temp");
+		$this->dirs = array();	// The module stores no file
 
 		// Config pages. Put here list of php page, stored into dunning/admin directory, to use to setup module.
 		$this->config_page_url = array("setup.php@dunning");
@@ -159,7 +158,7 @@ class modDunning extends DolibarrModules
 		// A condition to hide module
 		$this->hidden = getDolGlobalInt('MODULE_DUNNING_DISABLED'); // A condition to disable module;
 		// List of module class names that must be enabled if this module is enabled. Example: array('always'=>array('modModuleToEnable1','modModuleToEnable2'), 'FR'=>array('modModuleToEnableFR')...)
-		$this->depends = array();
+		$this->depends = array('modFacture', 'modCron', 'modAgenda');	// The events of the agenda are the memory of the reminders
 		// List of module class names to disable if this one is disabled. Example: array('modModuleToDisable1', ...)
 		$this->requiredby = array();
 		// List of module class names this module is in conflict with. Example: array('modModuleToDisable1', ...)
@@ -171,7 +170,7 @@ class modDunning extends DolibarrModules
 		// Prerequisites
 		$this->phpmin = array(7, 2); // Minimum version of PHP required by module
 		// $this->phpmax = array(8, 0); // Maximum version of PHP required by module
-		$this->need_dolibarr_version = array(19, -3); // Minimum version of Dolibarr required by module
+		$this->need_dolibarr_version = array(24, 0); // Minimum version of Dolibarr required by module
 		// $this->max_dolibarr_version = array(19, -3); // Maximum version of Dolibarr required by module
 		$this->need_javascript_ajax = 0;
 
@@ -186,7 +185,11 @@ class modDunning extends DolibarrModules
 		// Example: $this->const=array(1 => array('DUNNING_MYNEWCONST1', 'chaine', 'myvalue', 'This is a constant to add', 1),
 		//                             2 => array('DUNNING_MYNEWCONST2', 'chaine', 'myvalue', 'This is another constant to add', 0, 'current', 1)
 		// );
-		$this->const = array();
+		// No enable constant: the status of the scheduled job is the switch. The date of the first run is deleted with the module,
+		// so a module enabled again does not send the levels reached meanwhile.
+		$this->const = array(
+			0 => array('DUNNING_START_DATE', 'chaine', '', 'Date of the first run of the job: the levels reached before are sent by hand', 0, 'current', 1),
+		);
 
 		// Some keys to add into the overwriting translation tables
 		/*$this->overwrite_translation = array(
@@ -202,7 +205,9 @@ class modDunning extends DolibarrModules
 		// Array to add new pages in new tabs
 		/* BEGIN MODULEBUILDER TABS */
 		// Don't forget to deactivate/reactivate your module to test your changes
-		$this->tabs = array();
+		$this->tabs = array(
+			'invoice:+dunning:Dunning:dunning@dunning:$user->hasRight("dunning", "read") && $user->hasRight("facture", "lire"):/dunning/invoice_dunning.php?id=__ID__',
+		);
 		/* END MODULEBUILDER TABS */
 		// Example:
 		// To add a new tab identified by code tabname1
@@ -282,20 +287,20 @@ class modDunning extends DolibarrModules
 		// unit_frequency must be 60 for minute, 3600 for hour, 86400 for day, 604800 for week
 		/* BEGIN MODULEBUILDER CRON */
 		$this->cronjobs = array(
-			//  0 => array(
-			//      'label' => 'MyJob label',
-			//      'jobtype' => 'method',
-			//      'class' => '/dunning/class/myobject.class.php',
-			//      'objectname' => 'MyObject',
-			//      'method' => 'doScheduledJob',
-			//      'parameters' => '',
-			//      'comment' => 'Comment',
-			//      'frequency' => 2,
-			//      'unitfrequency' => 3600,
-			//      'status' => 0,
-			//      'test' => 'isModEnabled("dunning")',
-			//      'priority' => 50,
-			//  ),
+			0 => array(
+				'label' => 'DunningJob:dunning@dunning',
+				'jobtype' => 'method',
+				'class' => '/dunning/class/dunning.class.php',
+				'objectname' => 'Dunning',
+				'method' => 'sendReminders',
+				'parameters' => '',
+				'comment' => 'DunningJobComment',
+				'frequency' => 1,
+				'unitfrequency' => 3600 * 24,
+				'status' => 0,
+				'test' => 'isModEnabled("dunning") && isModEnabled("invoice")',
+				'priority' => 50,
+			),
 		);
 		/* END MODULEBUILDER CRON */
 		// Example: $this->cronjobs=array(
@@ -308,6 +313,14 @@ class modDunning extends DolibarrModules
 		$r = 0;
 		// Add here entries to declare new permissions
 		/* BEGIN MODULEBUILDER PERMISSIONS */
+		$this->rights[$r][0] = $this->numero + 1; // Permission id (must not be already used)
+		$this->rights[$r][1] = 'Read reminders of unpaid invoices'; // Permission label
+		$this->rights[$r][4] = 'read'; // In php code, permission will be checked by test if ($user->hasRight('dunning', 'read'))
+		$r++;
+		$this->rights[$r][0] = $this->numero + 2; // Permission id (must not be already used)
+		$this->rights[$r][1] = 'Send reminders, record payment promises'; // Permission label
+		$this->rights[$r][4] = 'write'; // In php code, permission will be checked by test if ($user->hasRight('dunning', 'write'))
+		$r++;
 		/*
 		$o = 1;
 		$this->rights[$r][0] = $this->numero . sprintf("%02d", ($o * 10) + 1); // Permission id (must not be already used)
@@ -334,20 +347,21 @@ class modDunning extends DolibarrModules
 		$r = 0;
 		// Add here entries to declare new menus
 		/* BEGIN MODULEBUILDER TOPMENU */
+		// No top menu: the list of the customers to remind is in the left menu of Billing
 		$this->menu[$r++] = array(
-			'fk_menu' => '', // Will be stored into mainmenu + leftmenu. Use '' if this is a top menu. For left menu, use 'fk_mainmenu=xxx' or 'fk_mainmenu=xxx,fk_leftmenu=yyy' where xxx is mainmenucode and yyy is a leftmenucode
-			'type' => 'top', // This is a Top menu entry
-			'titre' => 'ModuleDunningName',
-			'prefix' => img_picto('', $this->picto, 'class="pictofixedwidth valignmiddle"'),
-			'mainmenu' => 'dunning',
-			'leftmenu' => '',
-			'url' => '/dunning/dunningindex.php',
+			'fk_menu' => 'fk_mainmenu=billing', // Will be stored into mainmenu + leftmenu. Use '' if this is a top menu. For left menu, use 'fk_mainmenu=xxx' or 'fk_mainmenu=xxx,fk_leftmenu=yyy' where xxx is mainmenucode and yyy is a leftmenucode
+			'type' => 'left', // This is a Left menu entry
+			'titre' => 'Dunning',
+			'prefix' => img_picto('', $this->picto, 'class="paddingright pictofixedwidth"'),
+			'mainmenu' => 'billing',
+			'leftmenu' => 'dunning',
+			'url' => '/dunning/list.php',
 			'langs' => 'dunning@dunning', // Lang file to use (without .lang) by module. File must be in langs/code_CODE/ directory.
-			'position' => 1000 + $r,
-			'enabled' => "isModEnabled('dunning')", // Define condition to show or hide menu entry. Use "isModEnabled('dunning')" if entry must be visible if module is enabled (those quote marks are importants).
-			'perms' => '1', // Use 'perms'=>'$user->hasRight("dunning", "myobject", "read")' if you want your menu with a permission rules
+			'position' => 110,
+			'enabled' => 'isModEnabled("dunning") && isModEnabled("invoice")', // Define condition to show or hide menu entry.
+			'perms' => '$user->hasRight("dunning", "read") && $user->hasRight("facture", "lire")',
 			'target' => '',
-			'user' => 2, // 0=Menu for internal users, 1=external users, 2=both
+			'user' => 0, // 0=Menu for internal users, 1=external users, 2=both
 		);
 		/* END MODULEBUILDER TOPMENU */
 
