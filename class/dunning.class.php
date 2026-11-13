@@ -64,6 +64,17 @@ class Dunning
 	const CODE_PENALTY_INVOICE = 'AC_DUNNING_PENALTYINV';
 
 	/**
+	 * Code of the event recorded on a thirdparty excluded from the reminders
+	 */
+	const CODE_EXCLUDED = 'AC_DUNNING_EXCLUDED';
+
+	/**
+	 * Type of the email templates of the module: not 'facture_send', so the reminder jobs of the core never take them.
+	 * The core already knows it as a type of the invoices (FormMail::getEMailTemplate()).
+	 */
+	const TEMPLATE_TYPE = 'facture_relance';
+
+	/**
 	 * @var array<string,string> Ages of the aged balance and their language keys
 	 */
 	const AGINGS = array('aging_notdue' => 'DunningAgingNotDue', 'aging_30' => 'DunningAging30', 'aging_60' => 'DunningAging60', 'aging_90' => 'DunningAging90', 'aging_more' => 'DunningAgingMore');
@@ -89,9 +100,19 @@ class Dunning
 	public $errors = array();
 
 	/**
+	 * @var string[] Warnings of the last sending: an email sent without the PDF of an invoice, a customer without email
+	 */
+	public $warnings = array();
+
+	/**
 	 * @var string Output of the last sending
 	 */
 	public $output = '';
+
+	/**
+	 * @var string[] Emails of the last sending sent without the PDF of an invoice: an error of the scheduled job, nobody reads its output at night
+	 */
+	private $missingfiles = array();
 
 	/**
 	 * @var array<string,CEmailTemplate|ModelMail|int> Email templates by level and language, searched once per run
@@ -366,10 +387,10 @@ class Dunning
 		if (empty($rows)) {
 			return array();
 		}
-		if (isModEnabled('installments') && !$all) {
-			$this->applyInstallments($rows, $today, $decimals);
+		if (isModEnabled('installments') && $this->applyInstallments($rows, $today, $decimals, $all) < 0) {
+			return -1;	// Never reminded as a whole: the installments not due yet would be asked for
 		}
-		if (!$all && $this->forgetDirectDebitsInProgress($rows) < 0) {
+		if ($this->forgetDirectDebitsInProgress($rows, $all) < 0) {
 			return -1;
 		}
 		if (empty($rows)) {
@@ -456,17 +477,20 @@ class Dunning
 	/**
 	 * Invoices with a schedule of expected payments (module Echeances): reminded installment by installment. What is paid goes to the
 	 * installments by date, like in the module Echeances; the reference date is the oldest unpaid installment, the rest to pay the unpaid
-	 * part of the installments due (of the next one before its date), the late installments kept for the penalties.
+	 * part of the installments due (of the next one before its date), the late installments kept for the penalties. The installments never
+	 * ask for more than the rest to pay of the invoice (an invoice lowered after its schedule was made), what the schedule misses goes to its last one.
 	 * An installment is known by its due date: the module Echeances writes its lines again at each change of the schedule.
-	 * If its tables can not be read, the invoices are reminded as a whole.
 	 *
 	 * @param	array<int,array<string,mixed>>	$rows		Invoices being read by getInvoices(), changed in place
 	 * @param	int								$today		First hour of the day of the reading
 	 * @param	int								$decimals	Decimals of the totals
-	 * @return	int											0 if OK, -1 if the schedules could not be read (logged)
+	 * @param	bool							$whole		Statement of account: the rest to pay of the whole invoice, with its parts by date for the ages
+	 * @return	int											0 if OK, -1 if the schedules could not be read (error set)
 	 */
-	private function applyInstallments(array &$rows, $today, $decimals)
+	private function applyInstallments(array &$rows, $today, $decimals, $whole = false)
 	{
+		global $langs;
+
 		$sql = "SELECT s.fk_element, l.date_due, l.amount, l.fk_mode_reglement, l.fk_prelevement_demande FROM ".$this->db->prefix()."installments_line as l";
 		$sql .= " INNER JOIN ".$this->db->prefix()."installments_schedule as s ON s.rowid = l.fk_schedule";
 		$sql .= " WHERE s.element = 'facture' AND s.billing = 0 AND l.status <> 9";	// 9: installment abandoned
@@ -474,7 +498,9 @@ class Dunning
 		$sql .= $this->db->order('s.fk_element,l.date_due,l.rang,l.rowid', 'ASC,ASC,ASC,ASC');
 		$resql = $this->db->query($sql);
 		if (!$resql) {
-			dol_syslog(__METHOD__.' '.$this->db->lasterror(), LOG_WARNING);
+			$langs->load('dunning@dunning');
+			$this->error = $langs->trans('DunningErrorInstallments', $this->db->lasterror());
+			dol_syslog(__METHOD__.' '.$this->error, LOG_ERR);
 			return -1;
 		}
 		$unpaid = array();
@@ -491,18 +517,30 @@ class Dunning
 			}
 		}
 		foreach ($unpaid as $id => $installments) {
+			$left = $rows[$id]['remain'];
+			$parts = array();	// Unpaid part of each installment, within the rest to pay of the invoice
+			foreach ($installments as $installment) {
+				$part = min($installment[2], max(0.0, $left));
+				$left = round($left - $part, $decimals);
+				$parts[] = array($installment[1], $part);
+			}
+			$parts[count($parts) - 1][1] = round($parts[count($parts) - 1][1] + max(0.0, $left), $decimals);
 			$due = 0.0;
 			$amount = 0.0;
 			$late = array();
-			foreach ($installments as $installment) {
-				$due += ($installment[1] <= $today ? $installment[2] : 0.0);
-				$amount += ($installment[1] <= $today ? $installment[3] : 0.0);
-				if ($installment[1] < $today) {
-					$late[] = array($installment[1], $installment[2]);
+			foreach ($installments as $i => $installment) {
+				$due += ($installment[1] <= $today ? $parts[$i][1] : 0.0);
+				$amount += ($installment[1] <= $today ? $installment[3] - $installment[2] + $parts[$i][1] : 0.0);	// Its paid part and its rest
+				if ($installment[1] < $today && $parts[$i][1] > 0) {
+					$late[] = $parts[$i];
 				}
 			}
-			$remain = round($due ?: $installments[0][2], $decimals);
-			$amount = ($due ? $amount : $installments[0][3]);	// Amount of the installments reminded, shown in the email
+			if ($whole) {	// Statement of account: the whole invoice, from its oldest unpaid installment
+				$rows[$id] = array_merge($rows[$id], array('refdate' => $installments[0][1], 'installments' => $late, 'parts' => $parts));
+				continue;
+			}
+			$remain = round($due ?: $parts[0][1], $decimals);
+			$amount = ($due ? $amount : $installments[0][3] - $installments[0][2] + $parts[0][1]);	// Amount of the installments reminded, shown in the email
 			$ratio = ($rows[$id]['total_ttc'] != 0 ? $rows[$id]['mc_total'] / $rows[$id]['total_ttc'] : 1.0);
 			$directdebit = ($installments[0][4] ? $installments[0][4] == $this->getDirectDebitMode() : $rows[$id]['directdebit']);	// Mode of the installment, else of the invoice
 			$rows[$id] = array_merge($rows[$id], array('installment' => $installments[0][0], 'refdate' => $installments[0][1], 'remain' => $remain, 'installments' => $late, 'directdebit' => $directdebit,
@@ -548,15 +586,16 @@ class Dunning
 	 * the reminders go on. With a payment schedule, only the request of the installment reminded (or a request made on the invoice by hand)
 	 * stops it, not the one of a later installment.
 	 *
-	 * @param	array<int,array<string,mixed>>	$rows	Invoices being read by getInvoices(), changed in place
-	 * @return	int										0 if OK, -1 if error
+	 * @param	array<int,array<string,mixed>>	$rows		Invoices being read by getInvoices(), changed in place
+	 * @param	bool							$markonly	Statement of account: the invoice stays, with the date of the request in debitinprogress
+	 * @return	int											0 if OK, -1 if error
 	 */
-	private function forgetDirectDebitsInProgress(array &$rows)
+	private function forgetDirectDebitsInProgress(array &$rows, $markonly = false)
 	{
 		if (empty($rows)) {
 			return 0;
 		}
-		$sql = "SELECT pd.rowid, pd.fk_facture FROM ".$this->db->prefix()."prelevement_demande as pd";
+		$sql = "SELECT pd.rowid, pd.fk_facture, pd.date_demande FROM ".$this->db->prefix()."prelevement_demande as pd";
 		$sql .= " LEFT JOIN ".$this->db->prefix()."prelevement_bons as pb ON pb.rowid = pd.fk_prelevement_bons";
 		$sql .= " WHERE pd.fk_facture IN (".$this->db->sanitize(implode(',', array_map('intval', array_keys($rows)))).")";
 		$sql .= " AND (pd.traite = 0 OR pb.statut IN (0, 1))";	// BonPrelevement::STATUS_DRAFT and STATUS_TRANSFERED: not credited yet
@@ -568,8 +607,12 @@ class Dunning
 		while ($obj = $this->db->fetch_object($resql)) {
 			$id = (int) $obj->fk_facture;
 			$row = $rows[$id] ?? null;
-			if ($row && ((int) $obj->rowid == ($row['installmentdebit'] ?? 0) || !in_array((int) $obj->rowid, $row['installmentdebits'] ?? array()))) {	// Without schedule: any request
-				unset($rows[$id]);
+			if ($row && ($markonly || (int) $obj->rowid == ($row['installmentdebit'] ?? 0) || !in_array((int) $obj->rowid, $row['installmentdebits'] ?? array()))) {	// Without schedule, or marked only: any request
+				if ($markonly) {
+					$rows[$id]['debitinprogress'] = (int) $this->db->jdate($obj->date_demande);
+				} else {
+					unset($rows[$id]);
+				}
 			}
 		}
 
@@ -850,28 +893,125 @@ class Dunning
 	}
 
 	/**
-	 * Email template of a level in the language of the thirdparty: the template with the same label in this language, else the template of the level
+	 * Email template of a level in the language of the thirdparty: the template with the same label in this language, else the template of the level.
+	 * Only the templates of the module (column module = 'dunning'): the page of the email templates of the core never writes this column and lets a
+	 * user change only his own templates, so a user can not change the text sent to the customers by creating a template with the same label.
 	 *
 	 * @param	stdClass	$level			Level
 	 * @param	Translate	$outputlangs	Language of the thirdparty
-	 * @param	User		$user			User sending (private templates)
+	 * @param	User		$user			User sending (not used: the public templates only, never the private one of the user sending)
 	 * @param	bool		$bylang			False for a customer without language: the template chosen for the level, in its own language
 	 * @return	CEmailTemplate|ModelMail|int<-1,-1>	Template, -1 if not found (never the generic text of the core)
+	 * @see adoptTemplate()
 	 */
 	public function getTemplate(stdClass $level, Translate $outputlangs, User $user, $bylang = true)
 	{
 		$key = $level->rowid.'_'.($bylang ? $outputlangs->defaultlang : 'level');
 		if (!isset($this->templates[$key])) {
-			$formmail = new FormMail($this->db);
-			$public = new User($this->db);	// No user: the public templates only, never the private one of the user sending
-			$tpl = ($bylang ? $formmail->getEMailTemplate($this->db, 'facture_send', $public, $outputlangs, -2, 1, $level->template_label) : -1);
-			if (!is_object($tpl)) {
-				$tpl = $formmail->getEMailTemplate($this->db, 'facture_send', $public, $outputlangs, $level->fk_email_template);
+			$found = $this->findTemplate($level, $bylang ? (string) $outputlangs->defaultlang : '');
+			$tpl = -1;
+			if ($found) {	// Read by the core, which skips the template of a disabled module: nothing is sent while the module is disabled
+				$formmail = new FormMail($this->db);
+				$tpl = $formmail->getEMailTemplate($this->db, $found['type'], new User($this->db), $outputlangs, $found['id']);
 			}
 			$this->templates[$key] = ((is_object($tpl) && $tpl->id > 0) ? $tpl : -1);	// An unknown id gives the generic text "send invoice" without id
 		}
 
 		return $this->templates[$key];
+	}
+
+	/**
+	 * Template of the module of a level: the one with the label of the template of the level in the language (else in the main language, else
+	 * without language), else the template of the level itself. The templates of 1.5.0 are of type 'facture_send' until the module is enabled again.
+	 *
+	 * @param	stdClass	$level	Level
+	 * @param	string		$lang	Language of the customer, '' for the template of the level
+	 * @return	array{id:int,type:string}|null	Id and type of the template, null if none
+	 */
+	private function findTemplate(stdClass $level, $lang)
+	{
+		$main = explode('_', $lang)[0];
+		$main = $main.'_'.strtoupper($main);
+		$sql = "SELECT rowid, type_template, label, lang FROM ".$this->db->prefix()."c_email_templates";
+		$sql .= " WHERE module = 'dunning' AND type_template IN ('".$this->db->escape(self::TEMPLATE_TYPE)."', 'facture_send')";
+		$sql .= " AND private = 0 AND active = 1 AND entity IN (".getEntity('c_email_templates').")";
+		$sql .= " AND (rowid = ".((int) $level->fk_email_template);
+		if ($lang !== '' && $level->template_label !== '') {
+			$sql .= " OR label = '".$this->db->escape($level->template_label)."'";
+		}
+		$sql .= ")".$this->db->order('position,rowid', 'ASC,ASC');
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			dol_syslog(__METHOD__.' '.$this->db->lasterror(), LOG_ERR);
+			return null;
+		}
+		$found = null;
+		$best = 9;
+		while ($obj = $this->db->fetch_object($resql)) {
+			// Rank: the language of the customer, its main language, no language, then the template of the level
+			$rank = ((int) $obj->rowid == $level->fk_email_template ? 3 : 9);
+			if ($lang !== '' && $obj->label === $level->template_label) {
+				$rank = min($rank, (string) $obj->lang === $lang ? 0 : ((string) $obj->lang === $main ? 1 : ((string) $obj->lang === '' ? 2 : 9)));
+			}
+			if ($rank < $best) {
+				$best = $rank;
+				$found = array('id' => (int) $obj->rowid, 'type' => (string) $obj->type_template);
+			}
+		}
+
+		return $found;
+	}
+
+	/**
+	 * Templates the module can send, by type: those of the module, and the public templates of its type that an administrator can adopt
+	 *
+	 * @return	array<int,stdClass>|int<-1,-1>	Templates by rowid (label, lang, topic, module, fk_user, type_template), -1 if error
+	 * @see adoptTemplate()
+	 */
+	public function getModuleTemplates()
+	{
+		$sql = "SELECT rowid, label, lang, topic, module, fk_user, type_template FROM ".$this->db->prefix()."c_email_templates";
+		$sql .= " WHERE entity IN (".getEntity('c_email_templates').") AND private = 0 AND active = 1";
+		$sql .= " AND (type_template = '".$this->db->escape(self::TEMPLATE_TYPE)."' OR (module = 'dunning' AND type_template = 'facture_send'))";
+		$sql .= $this->db->order('label,lang', 'ASC,ASC');
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+		$templates = array();
+		while ($obj = $this->db->fetch_object($resql)) {
+			$templates[(int) $obj->rowid] = $obj;
+		}
+
+		return $templates;
+	}
+
+	/**
+	 * Adopt a template of the type of the module: the module sends it from then on. Its owner is removed, so only an administrator can change it.
+	 *
+	 * @param	User	$user	Administrator
+	 * @param	int		$id		Rowid of the template
+	 * @return	int				1 if adopted, 0 if not adoptable (not of the type, private, already of the module), -1 if error
+	 */
+	public function adoptTemplate(User $user, $id)
+	{
+		global $langs;
+
+		if (!$user->admin) {
+			$this->error = $langs->trans('NotEnoughPermissions');
+			return -1;
+		}
+		$sql = "UPDATE ".$this->db->prefix()."c_email_templates SET module = 'dunning', fk_user = NULL";
+		$sql .= " WHERE rowid = ".((int) $id)." AND entity IN (".getEntity('c_email_templates').") AND private = 0";
+		$sql .= " AND type_template = '".$this->db->escape(self::TEMPLATE_TYPE)."' AND (module IS NULL OR module = '')";
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+
+		return $this->db->affected_rows($resql) > 0 ? 1 : 0;
 	}
 
 	/**
@@ -898,13 +1038,20 @@ class Dunning
 			$totals[$row->currency] = $total;
 		}
 		$withpenalties = ($this->formatTotals($totals, array('penalties', 'indemnity'), $outputlangs) !== '');	// A column only when something is due
+		$withlink = $this->canPayOnline();
+		$debits = 0;
 		$table = '<table border="1" cellpadding="4" style="border-collapse: collapse"><tr><th>'.$outputlangs->trans('Ref').'</th><th>'.$outputlangs->trans('DateDue').'</th>';
-		$table .= '<th>'.$outputlangs->trans('Late').'</th><th>'.$outputlangs->trans('AmountTTC').'</th><th>'.$outputlangs->trans('AlreadyPaid').'</th><th>'.$outputlangs->trans('RemainderToPay').'</th>';
+		$table .= '<th>'.$outputlangs->trans('DunningDaysLate').'</th><th>'.$outputlangs->trans('AmountTTC').'</th><th>'.$outputlangs->trans('AlreadyPaid').'</th><th>'.$outputlangs->trans('RemainderToPay').'</th>';
 		$table .= ($withpenalties ? '<th>'.$outputlangs->trans('DunningPenaltiesColumn').'</th>' : '').'</tr>';
 		foreach ($group as $key => $row) {
 			$installment = ($row->installment !== '');	// Payment schedule: the installments reminded, not the whole invoice
-			$table .= '<tr><td><a href="'.dolPrintHTMLForAttributeUrl(getOnlinePaymentUrl(0, 'invoice', $row->ref)).'">'.dolPrintLabel($row->ref).'</a>';
-			$table .= ($installment ? '<br>'.dolPrintLabel($outputlangs->transnoentitiesnoconv('DunningInstallmentOf', dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs))) : '').'</td>';
+			$table .= '<tr><td>'.($withlink ? '<a href="'.dolPrintHTMLForAttributeUrl(getOnlinePaymentUrl(0, 'invoice', $row->ref)).'">'.dolPrintLabel($row->ref).'</a>' : dolPrintLabel($row->ref));
+			$table .= ($installment ? '<br>'.dolPrintLabel($outputlangs->transnoentitiesnoconv('DunningInstallmentOf', dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs))) : '');
+			if (!empty($row->debitinprogress)) {	// Statement of account: the bank takes the money, not to pay by transfer
+				$table .= '<br>'.$outputlangs->trans('DunningDirectDebitInProgress');
+				$debits++;
+			}
+			$table .= '</td>';
 			$table .= '<td>'.dol_print_date($row->refdate, 'day', 'tzserver', $outputlangs).'</td><td style="text-align: right">'.$amounts[$key]['days'].'</td>';
 			$table .= '<td style="text-align: right">'.price($installment ? $row->mc_installments : $row->mc_total, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';
 			$table .= '<td style="text-align: right">'.price($installment ? $row->mc_installments - $row->mc_remain : $row->mc_paid, 0, $outputlangs, 1, -1, -1, $row->currency).'</td>';	// Payments, credit notes and deposits used
@@ -927,7 +1074,7 @@ class Dunning
 		return array(
 			'__DUNNING_LEVEL__' => $level->label,
 			'__DUNNING_DAYS_LATE__' => (string) $late,
-			'__DUNNING_INVOICES__' => $table.'</table>',
+			'__DUNNING_INVOICES__' => $table.'</table>'.($withlink ? '<br>'.$outputlangs->trans('DunningPayOnline') : '').($debits ? '<br>'.$outputlangs->trans('DunningDirectDebitNoTransfer') : ''),
 			'__DUNNING_TOTAL_REMAIN__' => $formatted,
 			'__DUNNING_PENALTIES__' => $this->formatTotals($totals, array('penalties'), $outputlangs, true),
 			'__DUNNING_INDEMNITY__' => $this->formatTotals($totals, array('indemnity'), $outputlangs, true),
@@ -937,6 +1084,17 @@ class Dunning
 			'__AMOUNT_REMAIN_FORMATTED__' => $formatted,
 			'__AMOUNT_REMAIN_FORMATED__' => $formatted,	// Old spelling kept by the core
 		);
+	}
+
+	/**
+	 * Tell if the references of the emails link to the online payment page: an online payment module is enabled (the test of the card of an invoice)
+	 * and the security key is set, else the reference of the link could be changed to open the page of the invoice of another customer
+	 *
+	 * @return	bool	True if the links are written
+	 */
+	private function canPayOnline()
+	{
+		return getDolGlobalString('PAYMENT_SECURITY_TOKEN') !== '' && count(getValidOnlinePaymentMethods('')) > 0;
 	}
 
 	/**
@@ -974,10 +1132,12 @@ class Dunning
 	public function getAging(array $rows, $now)
 	{
 		$aging = array_fill_keys(array_keys(self::AGINGS), 0.0);
-		foreach ($rows as $row) {
-			$days = $this->daysLate($row->refdate, $now);
-			$key = ($days <= 0 ? 'aging_notdue' : ($days <= 30 ? 'aging_30' : ($days <= 60 ? 'aging_60' : ($days <= 90 ? 'aging_90' : 'aging_more'))));
-			$aging[$key] += $row->remain;
+		foreach ($rows as $row) {	// An invoice of the statement with a payment schedule: each installment at its own age
+			foreach (empty($row->parts) ? array(array($row->refdate, $row->remain)) : $row->parts as $part) {
+				$days = $this->daysLate($part[0], $now);
+				$key = ($days <= 0 ? 'aging_notdue' : ($days <= 30 ? 'aging_30' : ($days <= 60 ? 'aging_60' : ($days <= 90 ? 'aging_90' : 'aging_more'))));
+				$aging[$key] += $part[1];
+			}
 		}
 
 		return $aging;
@@ -1105,6 +1265,24 @@ class Dunning
 	}
 
 	/**
+	 * Invoices a mass action of the list sends: the due ones, never a level set to be sent by hand (a formal notice is sent one by one).
+	 * A level reached before the first run of the job, not set by hand, goes: it is the decision of the user who selects the customers.
+	 *
+	 * @param	array<int,stdClass>	$rows	Invoices as returned by getInvoices()
+	 * @return	array<int,stdClass>			Invoices to send, by id
+	 */
+	public function getMassSendable(array $rows)
+	{
+		foreach ($rows as $id => $row) {
+			if (!$row->due || !empty($row->next->byhand)) {
+				unset($rows[$id]);
+			}
+		}
+
+		return $rows;
+	}
+
+	/**
 	 * Send the next level of invoices: one email per invoice, or per customer and level if the level asks for it (or $forcegroup).
 	 * An event is recorded on each invoice of an email sent.
 	 *
@@ -1118,8 +1296,13 @@ class Dunning
 		global $langs;
 
 		$langs->loadLangs(array('mails', 'bills', 'dunning@dunning'));
+		$this->error = '';
 		if (!$this->canSend($user)) {
 			$this->error = $langs->trans('NotEnoughPermissions');
+			return -1;
+		}
+		if ($this->isCoreJobEnabled()) {	// The same guard as the job: the reminders of the core would also go
+			$this->error = ($this->error ?: $langs->trans('DunningCoreJobEnabled', $langs->transnoentitiesnoconv('SendEmailsRemindersOnInvoiceDueDate')));
 			return -1;
 		}
 		$recipients = $this->getRecipients($rows);
@@ -1128,11 +1311,15 @@ class Dunning
 		}
 		$groups = array();
 		foreach ($rows as $row) {
-			$groups[($row->next->percustomer || $forcegroup) ? $row->socid.'_'.$row->next->rowid.'_'.$row->currency : 'i'.$row->id][] = $row;	// One email per currency
+			$to = $recipients[$row->id];
+			sort($to);	// One email per currency and per recipients: a contact only gets the invoices it receives
+			$groups[($row->next->percustomer || $forcegroup) ? $row->socid.'_'.$row->next->rowid.'_'.$row->currency.'_'.implode(',', $to) : 'i'.$row->id][] = $row;
 		}
 
 		$this->output = '';
 		$this->errors = array();
+		$this->warnings = array();
+		$this->missingfiles = array();
 		$nbemails = 0;
 		$nbinvoices = 0;
 		foreach ($groups as $group) {	// Its queries (events read again, fetch, events recorded) are bounded by the emails of the day
@@ -1219,8 +1406,8 @@ class Dunning
 			$to = array_merge($to, $recipients[$row->id]);
 		}
 		$to = implode(',', array_unique($to));
-		if (empty($to)) {
-			$this->errors[] = $refs.': '.dolPrintLabel($langs->transnoentitiesnoconv('NoRecipientEmail', $first->socname));
+		if (empty($to)) {	// A warning, not an error of the job every day: the customer is reminded once it has an email
+			$this->warnings[] = $refs.': '.dolPrintLabel($langs->transnoentitiesnoconv('NoRecipientEmail', $first->socname));
 			return 0;
 		}
 		$from = ($tpl->email_from ?: getDolGlobalString('MAIN_MAIL_EMAIL_FROM'));
@@ -1251,6 +1438,7 @@ class Dunning
 		$files = array();
 		$mimes = array();
 		$names = array();
+		$missing = array();
 		if ($tpl->joinfiles) {
 			foreach ($group as $row) {
 				$file = DOL_DATA_ROOT.'/'.$row->last_main_doc;
@@ -1260,7 +1448,7 @@ class Dunning
 					$names[] = dol_basename($file);
 				} else {
 					$langs->load('errors');
-					$this->output .= "\n".$row->ref.': '.dolPrintLabel($langs->transnoentitiesnoconv('ErrorFileNotFound', $row->last_main_doc));
+					$missing[] = $row->ref.': '.dolPrintLabel($langs->transnoentitiesnoconv('DunningErrorNoPdf', $row->last_main_doc));
 				}
 			}
 		}
@@ -1269,6 +1457,9 @@ class Dunning
 			dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningnotice.modules.php');
 			dol_include_once('/dunning/core/modules/societe/doc/pdf_dunningstatement.modules.php');
 			$notice = ($level->joinnotice == 2 ? new pdf_dunningstatement($this->db) : new pdf_dunningnotice($this->db));
+			if ($level->joinnotice != 2) {	// The formal notice asks for the invoices and the total of the email, the statement shows all
+				$notice->rows = $group;
+			}
 			$thirdparty = $invoice->thirdparty;
 			'@phan-var-force Societe $thirdparty';
 			if ($notice->write_file($thirdparty, $outputlangs) <= 0) {
@@ -1290,8 +1481,9 @@ class Dunning
 			return 0;
 		}
 
-		// Then the memory of the reminder: one event per invoice of the email
-		$this->db->begin();
+		$this->warnings = array_merge($this->warnings, $missing);	// Said once the email is sent
+		$this->missingfiles = array_merge($this->missingfiles, $missing);
+		// Then the memory of the reminder: one event per invoice of the email, each on its own (one that fails does not cancel the others)
 		foreach ($group as $row) {
 			$event = new ActionComm($this->db);
 			$event->type_code = 'AC_OTH_AUTO';
@@ -1314,13 +1506,10 @@ class Dunning
 			$event->email_to = dol_trunc($to, 250, 'right', 'UTF-8', 1);
 			$event->errors_to = $errorsto;
 			if ($event->create($user) < 0) {
-				$this->db->rollback();
-				$this->errors[] = $refs.': '.dolPrintLabel($langs->transnoentitiesnoconv('DunningErrorNotRecorded', $event->error));
-				dol_syslog(__METHOD__.' '.$refs.' sent but not recorded: '.$event->error, LOG_ERR);
-				return count($group);
+				$this->errors[] = $row->ref.': '.dolPrintLabel($langs->transnoentitiesnoconv('DunningErrorNotRecorded', $event->error));
+				dol_syslog(__METHOD__.' '.$row->ref.' sent but not recorded: '.$event->error, LOG_ERR);
 			}
 		}
-		$this->db->commit();
 
 		return count($group);
 	}
@@ -1418,11 +1607,28 @@ class Dunning
 		while ($obj = $this->db->fetch_object($resql)) {
 			$excluded[] = (int) $obj->fk_soc;
 		}
+		$langs->load('dunning@dunning');
 		foreach (array_diff($socids, $excluded) as $socid) {	// Bounded by the customers selected on one page
 			$soc = new Societe($this->db);
 			$soc->id = $socid;	// add_type() only needs the id
 			if ($category->add_type($soc, Categorie::TYPE_CUSTOMER) < 0) {
 				$this->error = $category->error;
+				return -1;
+			}
+			$event = new ActionComm($this->db);	// A trace on the customer: who excluded it, when, by which tag
+			$event->type_code = 'AC_OTH_AUTO';
+			$event->code = self::CODE_EXCLUDED;
+			$event->label = $langs->transnoentities('DunningExcludedEvent', $category->label);
+			$event->socid = $socid;
+			$event->elementtype = 'societe';
+			$event->elementid = $socid;
+			$event->datep = dol_now();
+			$event->datef = $event->datep;
+			$event->percentage = -1;
+			$event->authorid = $user->id;
+			$event->userownerid = $user->id;
+			if ($event->create($user) < 0) {
+				$this->error = $event->error;
 				return -1;
 			}
 		}
@@ -1505,18 +1711,104 @@ class Dunning
 	{
 		return array(
 			array('Relances - 1 Courtoisie / Courtesy', 'fr_FR', 10, 'Rappel : facture(s) bientôt à échéance',
-				'Bonjour,<br><br>Pour rappel, la ou les factures suivantes arrivent bientôt à échéance :<br>__DUNNING_INVOICES__<br>Total restant à payer : __DUNNING_TOTAL_REMAIN__. Vous pouvez régler en ligne depuis les liens du tableau.<br><br>Si votre règlement est déjà parti, merci de ne pas tenir compte de ce message.<br><br>Cordialement,<br>__MYCOMPANY_NAME__'),
+				'Bonjour,<br><br>Pour rappel, la ou les factures suivantes arrivent bientôt à échéance :<br>__DUNNING_INVOICES__<br>Total restant à payer : __DUNNING_TOTAL_REMAIN__.<br><br>Si votre règlement est déjà parti, merci de ne pas tenir compte de ce message.<br><br>Cordialement,<br>__MYCOMPANY_NAME__'),
 			array('Relances - 1 Courtoisie / Courtesy', 'en_US', 10, 'Reminder: invoice(s) due soon',
-				'Hello,<br><br>As a reminder, the following invoice(s) will soon be due:<br>__DUNNING_INVOICES__<br>Total remaining to pay: __DUNNING_TOTAL_REMAIN__. You can pay online from the links of the table.<br><br>If you have already paid, please ignore this message.<br><br>Best regards,<br>__MYCOMPANY_NAME__'),
+				'Hello,<br><br>As a reminder, the following invoice(s) will soon be due:<br>__DUNNING_INVOICES__<br>Total remaining to pay: __DUNNING_TOTAL_REMAIN__.<br><br>If you have already paid, please ignore this message.<br><br>Best regards,<br>__MYCOMPANY_NAME__'),
 			array('Relances - 2 Relance / Reminder', 'fr_FR', 20, 'Relance : factures impayées (__DUNNING_TOTAL_REMAIN__)',
 				'Bonjour,<br><br>Sauf erreur de notre part, les factures suivantes restent impayées à ce jour :<br>__DUNNING_INVOICES__<br>Total restant dû : __DUNNING_TOTAL_REMAIN__.<br><br>Merci de procéder à leur règlement dans les meilleurs délais, ou de nous indiquer la date à laquelle il interviendra. Si votre règlement est déjà parti, merci de ne pas tenir compte de ce message.<br>__DUNNING_PENALTIES_TEXT__<br><br>Cordialement,<br>__MYCOMPANY_NAME__'),
 			array('Relances - 2 Relance / Reminder', 'en_US', 20, 'Reminder: unpaid invoices (__DUNNING_TOTAL_REMAIN__)',
 				'Hello,<br><br>Unless we are mistaken, the following invoices are still unpaid:<br>__DUNNING_INVOICES__<br>Total remaining due: __DUNNING_TOTAL_REMAIN__.<br><br>Please pay them as soon as possible, or let us know when you will. If you have already paid, please ignore this message.<br>__DUNNING_PENALTIES_TEXT__<br><br>Best regards,<br>__MYCOMPANY_NAME__'),
-			array('Relances - 3 Mise en demeure / Formal notice', 'fr_FR', 30, 'Mise en demeure de payer : __DUNNING_TOTAL_REMAIN__',
-				'Madame, Monsieur,<br><br>Malgré nos précédentes relances, les factures suivantes restent impayées :<br>__DUNNING_INVOICES__<br>Total restant dû : __DUNNING_TOTAL_REMAIN__.<br>__DUNNING_PENALTIES_TEXT__<br><br>Par la présente, nous vous mettons en demeure de régler cette somme sous huit jours. À défaut, nous serons contraints d\'engager une procédure de recouvrement.<br><br>Veuillez agréer, Madame, Monsieur, nos salutations distinguées.<br>__MYCOMPANY_NAME__'),
-			array('Relances - 3 Mise en demeure / Formal notice', 'en_US', 30, 'Formal notice to pay: __DUNNING_TOTAL_REMAIN__',
-				'Dear Sir or Madam,<br><br>Despite our previous reminders, the following invoices are still unpaid:<br>__DUNNING_INVOICES__<br>Total remaining due: __DUNNING_TOTAL_REMAIN__.<br>__DUNNING_PENALTIES_TEXT__<br><br>We hereby give you formal notice to pay this amount within eight days. Failing that, we will have to start a debt recovery procedure.<br><br>Yours faithfully,<br>__MYCOMPANY_NAME__'),
+			array('Relances - 3 Mise en demeure / Formal notice', 'fr_FR', 30, 'Mise en demeure de payer : __DUNNING_TOTAL_WITH_PENALTIES__',
+				'Madame, Monsieur,<br><br>À ce jour, les factures suivantes restent impayées :<br>__DUNNING_INVOICES__<br>Total restant dû : __DUNNING_TOTAL_REMAIN__.<br>__DUNNING_PENALTIES_TEXT__<br><br>Par la présente, nous vous mettons en demeure de régler la somme de __DUNNING_TOTAL_WITH_PENALTIES__ sous huit jours. À défaut, nous serons contraints d\'engager une procédure de recouvrement.<br><br>Veuillez agréer, Madame, Monsieur, nos salutations distinguées.<br>__MYCOMPANY_NAME__'),
+			array('Relances - 3 Mise en demeure / Formal notice', 'en_US', 30, 'Formal notice to pay: __DUNNING_TOTAL_WITH_PENALTIES__',
+				'Dear Sir or Madam,<br><br>To date, the following invoices are still unpaid:<br>__DUNNING_INVOICES__<br>Total remaining due: __DUNNING_TOTAL_REMAIN__.<br>__DUNNING_PENALTIES_TEXT__<br><br>We hereby give you formal notice to pay the sum of __DUNNING_TOTAL_WITH_PENALTIES__ within eight days. Failing that, we will have to start a debt recovery procedure.<br><br>Yours faithfully,<br>__MYCOMPANY_NAME__'),
 		);
+	}
+
+	/**
+	 * Texts of the templates of 1.5.0 changed since: replaced by the new ones when the user did not change them
+	 *
+	 * @return array<array{0:string,1:string,2:string,3:string}>	Label, language, field (topic or content) and text of 1.5.0
+	 */
+	private function getOldTemplateTexts()
+	{
+		return array(
+			array('Relances - 1 Courtoisie / Courtesy', 'fr_FR', 'content', 'Bonjour,<br><br>Pour rappel, la ou les factures suivantes arrivent bientôt à échéance :<br>__DUNNING_INVOICES__<br>Total restant à payer : __DUNNING_TOTAL_REMAIN__. Vous pouvez régler en ligne depuis les liens du tableau.<br><br>Si votre règlement est déjà parti, merci de ne pas tenir compte de ce message.<br><br>Cordialement,<br>__MYCOMPANY_NAME__'),
+			array('Relances - 1 Courtoisie / Courtesy', 'en_US', 'content', 'Hello,<br><br>As a reminder, the following invoice(s) will soon be due:<br>__DUNNING_INVOICES__<br>Total remaining to pay: __DUNNING_TOTAL_REMAIN__. You can pay online from the links of the table.<br><br>If you have already paid, please ignore this message.<br><br>Best regards,<br>__MYCOMPANY_NAME__'),
+			array('Relances - 3 Mise en demeure / Formal notice', 'fr_FR', 'topic', 'Mise en demeure de payer : __DUNNING_TOTAL_REMAIN__'),
+			array('Relances - 3 Mise en demeure / Formal notice', 'fr_FR', 'content', 'Madame, Monsieur,<br><br>Malgré nos précédentes relances, les factures suivantes restent impayées :<br>__DUNNING_INVOICES__<br>Total restant dû : __DUNNING_TOTAL_REMAIN__.<br>__DUNNING_PENALTIES_TEXT__<br><br>Par la présente, nous vous mettons en demeure de régler cette somme sous huit jours. À défaut, nous serons contraints d\'engager une procédure de recouvrement.<br><br>Veuillez agréer, Madame, Monsieur, nos salutations distinguées.<br>__MYCOMPANY_NAME__'),
+			array('Relances - 3 Mise en demeure / Formal notice', 'en_US', 'topic', 'Formal notice to pay: __DUNNING_TOTAL_REMAIN__'),
+			array('Relances - 3 Mise en demeure / Formal notice', 'en_US', 'content', 'Dear Sir or Madam,<br><br>Despite our previous reminders, the following invoices are still unpaid:<br>__DUNNING_INVOICES__<br>Total remaining due: __DUNNING_TOTAL_REMAIN__.<br>__DUNNING_PENALTIES_TEXT__<br><br>We hereby give you formal notice to pay this amount within eight days. Failing that, we will have to start a debt recovery procedure.<br><br>Yours faithfully,<br>__MYCOMPANY_NAME__'),
+		);
+	}
+
+	/**
+	 * At each activation: the templates of the module get its own type (the reminder jobs of the core no longer take them), and the texts
+	 * of 1.5.0 that the user did not change get the texts of now. Bounded by the 6 texts of the module.
+	 *
+	 * @return	int		Number of changes, <0 if KO
+	 */
+	public function upgradeTemplates()
+	{
+		global $conf;
+
+		$where = " WHERE entity = ".((int) $conf->entity)." AND module = 'dunning'";
+		$sqls = array("UPDATE ".$this->db->prefix()."c_email_templates SET type_template = '".$this->db->escape(self::TEMPLATE_TYPE)."'".$where." AND type_template = 'facture_send'");
+		$new = array();
+		foreach ($this->getDefaultTemplates() as $template) {
+			$new[$template[0].'|'.$template[1]] = array('topic' => $template[3], 'content' => $template[4]);
+		}
+		foreach ($this->getOldTemplateTexts() as $old) {
+			// @phan-suppress-next-line SqlInjection	(field topic or content of getOldTemplateTexts())
+			$sql = "UPDATE ".$this->db->prefix()."c_email_templates SET ".$old[2]." = '".$this->db->escape($new[$old[0].'|'.$old[1]][$old[2]])."'".$where;
+			// @phan-suppress-next-line SqlInjection	(field topic or content of getOldTemplateTexts())
+			$sqls[] = $sql." AND label = '".$this->db->escape($old[0])."' AND lang = '".$this->db->escape($old[1])."' AND ".$old[2]." = '".$this->db->escape($old[3])."'";
+		}
+		$nb = 0;
+		foreach ($sqls as $sql) {
+			$resql = $this->db->query($sql);
+			if (!$resql) {
+				$this->error = $this->db->lasterror();
+				return -1;
+			}
+			$nb += $this->db->affected_rows($resql);
+		}
+
+		// A level of 1.5.0 on a template that is not of the module (of the core, of a user): a copy of it becomes a template of the module.
+		// Bounded by the levels; at the next activation, no level is left on such a template.
+		$sql = "SELECT l.rowid as levelid, t.rowid, t.label, t.lang, t.topic, t.content, t.joinfiles, t.position FROM ".$this->db->prefix()."dunning_level as l";
+		$sql .= " INNER JOIN ".$this->db->prefix()."c_email_templates as t ON t.rowid = l.fk_email_template";
+		$sql .= " WHERE l.entity = ".((int) $conf->entity)." AND (t.module IS NULL OR t.module <> 'dunning')";
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			$this->error = $this->db->lasterror();
+			return -1;
+		}
+		$copies = array();
+		$levels = array();
+		while ($obj = $this->db->fetch_object($resql)) {
+			$levels[(int) $obj->levelid] = $obj;
+		}
+		foreach ($levels as $levelid => $obj) {
+			if (!isset($copies[(int) $obj->rowid])) {
+				$sql = "INSERT INTO ".$this->db->prefix()."c_email_templates (entity, module, type_template, lang, private, label, position, enabled, active, topic, joinfiles, content)";
+				$sql .= " VALUES (".((int) $conf->entity).", 'dunning', '".$this->db->escape(self::TEMPLATE_TYPE)."', '".$this->db->escape((string) $obj->lang)."', 0";
+				$sql .= ", '".$this->db->escape(dol_trunc((string) $obj->label, 160, 'right', 'UTF-8', 1).' (Relances '.((int) $obj->rowid).')')."', ".((int) $obj->position);
+				$sql .= ", '1', 1, '".$this->db->escape((string) $obj->topic)."', ".((int) $obj->joinfiles).", '".$this->db->escape((string) $obj->content)."')";
+				if (!$this->db->query($sql)) {
+					$this->error = $this->db->lasterror();
+					return -1;
+				}
+				$copies[(int) $obj->rowid] = (int) $this->db->last_insert_id($this->db->prefix().'c_email_templates');
+			}
+			if (!$this->db->query("UPDATE ".$this->db->prefix()."dunning_level SET fk_email_template = ".((int) $copies[(int) $obj->rowid])." WHERE rowid = ".((int) $levelid))) {
+				$this->error = $this->db->lasterror();
+				return -1;
+			}
+			$nb++;
+		}
+
+		return $nb;
 	}
 
 	/**
@@ -1546,7 +1838,7 @@ class Dunning
 				continue;
 			}
 			$sql = "INSERT INTO ".$this->db->prefix()."c_email_templates (entity, module, type_template, lang, private, label, position, enabled, active, topic, joinfiles, content)";
-			$sql .= " VALUES (".((int) $conf->entity).", 'dunning', 'facture_send', '".$this->db->escape($template[1])."', 0, '".$this->db->escape($template[0])."', ".((int) $template[2]);
+			$sql .= " VALUES (".((int) $conf->entity).", 'dunning', '".$this->db->escape(self::TEMPLATE_TYPE)."', '".$this->db->escape($template[1])."', 0, '".$this->db->escape($template[0])."', ".((int) $template[2]);
 			$sql .= ", '1', 1, '".$this->db->escape($template[3])."', 1, '".$this->db->escape($template[4])."')";
 			if (!$this->db->query($sql)) {
 				$this->error = $this->db->lasterror();
@@ -1702,6 +1994,64 @@ class Dunning
 	}
 
 	/**
+	 * Tell if the scheduled job of the module is enabled: else nothing is sent automatically
+	 *
+	 * @return	bool	True if enabled
+	 */
+	public function isJobEnabled()
+	{
+		$job = new Cronjob($this->db);
+
+		return $job->fetch(0, 'Dunning', 'sendReminders') > 0 && $job->status == Cronjob::STATUS_ENABLED;
+	}
+
+	/**
+	 * Why an invoice is not reminded, and how to remind it again
+	 *
+	 * @param	User		$user		User reading
+	 * @param	Facture		$invoice	Invoice not returned by getInvoices()
+	 * @return	array{text:string,url:string,link:string}	Reason, and the page to change it ('' if none): texts not escaped, see dolPrintLabel()
+	 */
+	public function getNotRemindedReason(User $user, Facture $invoice)
+	{
+		global $langs;
+
+		$langs->loadLangs(array('bills', 'dunning@dunning'));
+		$reason = array('text' => $langs->transnoentitiesnoconv('DunningNotReminded'), 'url' => '', 'link' => '');
+		if ($invoice->status != Facture::STATUS_VALIDATED || $invoice->paye || !in_array($invoice->type, array(Facture::TYPE_STANDARD, Facture::TYPE_REPLACEMENT, Facture::TYPE_DEPOSIT, Facture::TYPE_SITUATION))) {
+			return array_merge($reason, array('text' => $langs->transnoentitiesnoconv('DunningReasonNotToPay')));
+		}
+		if ($invoice->dispute_status == 1) {
+			return array('text' => $langs->transnoentitiesnoconv('DunningReasonDispute'), 'url' => DOL_URL_ROOT.'/compta/facture/card.php?facid='.((int) $invoice->id).'&action=editdispute_status&token='.newToken(), 'link' => $langs->transnoentitiesnoconv('DunningCloseDispute'));
+		}
+		$rows = $this->getInvoices($user, dol_now(), array(), 0, (int) $invoice->id, true);	// As a whole: what the reminders leave out stays, marked
+		$row = (is_array($rows) ? ($rows[$invoice->id] ?? null) : null);
+		if (!is_array($rows)) {
+			return array_merge($reason, array('text' => $this->error));
+		}
+		if (!$row) {
+			return array_merge($reason, array('text' => $langs->transnoentitiesnoconv('DunningReasonNotToPay')));
+		}
+		if (!empty($row->debitinprogress)) {
+			$days = $this->daysLate(dol_get_first_hour($row->debitinprogress), dol_now());
+			return array('text' => $langs->transnoentitiesnoconv('DunningReasonDirectDebit', dol_print_date($row->debitinprogress, 'day'), (string) $days),
+				'url' => DOL_URL_ROOT.'/compta/facture/prelevement.php?facid='.((int) $invoice->id), 'link' => $langs->transnoentitiesnoconv('DunningSeeDirectDebits'));
+		}
+		$category = new Categorie($this->db);
+		if (getDolGlobalInt('DUNNING_EXCLUDED_CATEGORY') > 0 && $category->fetch(getDolGlobalInt('DUNNING_EXCLUDED_CATEGORY')) > 0
+			&& $category->containsObject('customer', (int) $invoice->socid) > 0) {
+			return array('text' => $langs->transnoentitiesnoconv('DunningReasonExcluded', $category->label), 'url' => DOL_URL_ROOT.'/societe/card.php?socid='.((int) $invoice->socid),
+				'link' => $langs->transnoentitiesnoconv('DunningSeeCustomer'));
+		}
+		$levels = $this->fetchLevels();
+		if (is_array($levels) && empty($levels)) {
+			return array_merge($reason, array('text' => $langs->transnoentitiesnoconv('DunningReasonNoLevel')));
+		}
+
+		return $reason;
+	}
+
+	/**
 	 * Tell if the reminder job of the core, or one of its clones, is enabled: it would send reminders twice
 	 *
 	 * @return	bool	True if enabled
@@ -1758,6 +2108,15 @@ class Dunning
 			}
 		}
 		$result = ($rows ? $this->send($user, $rows) : 0);
+		if ($result >= 0 && $this->missingfiles) {	// An email without the PDF of an invoice: an error of the job, seen in the list of the jobs
+			$this->errors = array_merge($this->errors, $this->missingfiles);
+			$result = count($this->errors);
+		}
+		$others = array_diff($this->warnings, $this->missingfiles);	// A customer without email: in the output, not an error every day
+		$this->output .= ($others ? "\n".implode("\n", $others) : '');
+		if ($result > 0) {	// Read by the list of the scheduled jobs
+			$this->error = implode("\n", $this->errors);
+		}
 		dol_syslog(__METHOD__.' '.count($rows).' invoice(s) to remind, '.count($this->errors).' error(s)', LOG_INFO);
 
 		return $result;

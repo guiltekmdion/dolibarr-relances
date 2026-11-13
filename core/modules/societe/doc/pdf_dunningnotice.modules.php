@@ -40,6 +40,11 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 	protected $statement = false;
 
 	/**
+	 * @var ?array<int,stdClass> Invoices of the formal notice attached to an email: the invoices and the total of the email, else read again
+	 */
+	public $rows = null;
+
+	/**
 	 * Constructor
 	 *
 	 * @param	DoliDB	$db		Database handler
@@ -86,28 +91,31 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 		}
 		$outputlangs->loadLangs(array('main', 'dict', 'companies', 'bills', 'dunning@dunning'));
 
-		// The late invoices of the customer with the penalties due today, or all its invoices to pay for a statement
+		// The invoices of the email, else the late invoices of the customer with the penalties due today, or all its invoices to pay for a statement
 		$dunning = new Dunning($this->db);
 		$now = dol_now();
-		$rows = $dunning->getInvoices($user, $now, array((int) $object->id), 0, 0, $this->statement);
+		$rows = $this->rows;
 		if (!is_array($rows)) {
-			$this->error = $dunning->error;
-			return -1;
-		}
-		foreach ($rows as $id => $row) {
-			if (!$this->statement && $row->refdate >= dol_get_first_hour($now)) {
-				unset($rows[$id]);
+			$rows = $dunning->getInvoices($user, $now, array((int) $object->id), 0, 0, $this->statement);
+			if (!is_array($rows)) {
+				$this->error = $dunning->error;
+				return -1;
+			}
+			foreach ($rows as $id => $row) {
+				if (!$this->statement && $row->refdate >= dol_get_first_hour($now)) {
+					unset($rows[$id]);
+				}
 			}
 		}
 		if (empty($rows)) {
 			$this->error = $outputlangs->trans($this->statement ? 'DunningStatementNoInvoice' : 'DunningNoticeNoLateInvoice');
 			return 0;
 		}
-		$subst = $dunning->getSubstitutions($rows, (object) array('label' => ''), $outputlangs, $now);
 		$prefix = ($this->statement ? 'DunningStatement' : 'DunningNotice');
 
 		$dir = $conf->societe->multidir_output[$object->entity ?: $conf->entity].'/'.((int) $object->id);
-		$file = $dir.'/'.dol_sanitizeFileName($outputlangs->transnoentitiesnoconv($prefix.'File').'-'.dol_print_date($now, 'dayrfc')).'.pdf';
+		$first = (is_array($this->rows) ? reset($this->rows) : null);	// The notice of an email: one file per email, not one per day
+		$file = $dir.'/'.dol_sanitizeFileName($outputlangs->transnoentitiesnoconv($prefix.'File').'-'.dol_print_date($now, 'dayrfc').($first ? '-'.$first->ref : '')).'.pdf';
 		if (dol_mkdir($dir) < 0) {
 			$this->error = $outputlangs->transnoentities('ErrorCanNotCreateDir', $dir);
 			return -1;
@@ -124,6 +132,7 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 		$pdf->Open();
 		$pdf->SetTitle($outputlangs->convToOutputCharset($outputlangs->transnoentities($prefix.'Subject')));
 		$pdf->SetCreator('Dolibarr '.DOL_VERSION);
+		$pdf->SetKeyWords($outputlangs->convToOutputCharset(implode(' ', array_column($rows, 'ref'))));	// The invoices of the document
 		$pdf->SetMargins($this->marge_gauche, $this->marge_haute, $this->marge_droite);	// @phan-suppress-current-line PhanPluginSuspiciousParamOrder
 		$pdf->AddPage();
 		pdf_pagehead($pdf, $outputlangs, $this->page_hauteur);
@@ -154,9 +163,49 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 		$pdf->MultiCell(90, 4, pdf_build_address($outputlangs, $mysoc, $object, '', 0, 'target'), 0, 'L');	// @phan-suppress-current-line PhanPluginSuspiciousParamPosition
 
 		// Letter, with the table of the invoices of the reminders
+		$html = $this->getLetter($object, $rows, $outputlangs, $now);
+		$pdf->SetFont('', '', $fontsize - 1);
+		$pdf->writeHTMLCell($this->page_largeur - $this->marge_gauche - $this->marge_droite, 0, $this->marge_gauche, $this->marge_haute + 70, $html, 0, 1);
+
+		// Bank account of the invoices, for a payment by transfer: none if all the invoices are taken by direct debit
+		if (isModEnabled('bank') && getDolGlobalInt('FACTURE_RIB_NUMBER') > 0 && count(array_filter(array_column($rows, 'debitinprogress'))) < count($rows)) {
+			require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/account.class.php';
+			$account = new Account($this->db);
+			if ($account->fetch(getDolGlobalInt('FACTURE_RIB_NUMBER')) > 0) {
+				pdf_bank($pdf, $outputlangs, $this->marge_gauche, $pdf->GetY() + 4, $account, 0, $fontsize);
+			}
+		}
+
+		$pdf->setAutoPageBreak(false);	// The footer is written in the bottom margin
+		pdf_pagefoot($pdf, $outputlangs, '', $mysoc, $this->marge_basse, $this->marge_gauche, $this->page_hauteur, $object, 0, 1);
+		$pdf->Close();
+		$pdf->Output($file, 'F');
+		dolChmod($file);
+		$this->result = array('fullpath' => $file);
+
+		return 1;
+	}
+
+	/**
+	 * Text of the letter: subject, invoices, totals, ages (statement) or penalties and formal notice, credits of the customer, closing
+	 *
+	 * @param	Societe				$object			Customer
+	 * @param	array<int,stdClass>	$rows			Invoices, as returned by Dunning::getInvoices()
+	 * @param	Translate			$outputlangs	Language of the document
+	 * @param	int					$now			Date of the document
+	 * @return	string								HTML
+	 */
+	public function getLetter(Societe $object, array $rows, Translate $outputlangs, $now)
+	{
+		global $conf, $mysoc;
+
+		$dunning = new Dunning($this->db);
+		$subst = $dunning->getSubstitutions($rows, (object) array('label' => ''), $outputlangs, $now);
+		$prefix = ($this->statement ? 'DunningStatement' : 'DunningNotice');
 		$html = '<p style="text-align: right">'.dolPrintLabel(trim($mysoc->town.', '.dol_print_date($now, 'daytext', 'tzserver', $outputlangs), ', ')).'</p>';
 		$html .= '<p><b>'.$outputlangs->trans($prefix.'Subject').'</b></p>';
-		$html .= '<p>'.$outputlangs->trans($prefix.'Intro').'</p>'.$subst['__DUNNING_INVOICES__'];
+		$reminded = !empty(array_filter(array_column($rows, 'last')));	// "Despite our previous reminders" only after one
+		$html .= '<p>'.$outputlangs->trans($prefix.'Intro'.($this->statement || $reminded ? '' : 'First')).'</p>'.$subst['__DUNNING_INVOICES__'];
 		$html .= '<p>'.$outputlangs->trans('DunningNoticeTotal', $subst['__DUNNING_TOTAL_REMAIN__']).'</p>';
 		if ($this->statement) {	// The aged balance, then a simple closing
 			$html .= '<table border="1" cellpadding="4" style="border-collapse: collapse"><tr>';
@@ -173,26 +222,15 @@ class pdf_dunningnotice extends ModeleThirdPartyDoc
 			$html .= ($subst['__DUNNING_PENALTIES_TEXT__'] !== '' ? '<p>'.dolPrintLabel($subst['__DUNNING_PENALTIES_TEXT__']).'</p>' : '');
 			$html .= '<p>'.$outputlangs->trans('DunningNoticeBody', $subst['__DUNNING_TOTAL_WITH_PENALTIES__']).'</p>';
 		}
-		$html .= '<p>'.$outputlangs->trans($prefix.'Closing').'</p><p>'.dolPrintLabel($mysoc->name).'</p>';
-		$pdf->SetFont('', '', $fontsize - 1);
-		$pdf->writeHTMLCell($this->page_largeur - $this->marge_gauche - $this->marge_droite, 0, $this->marge_gauche, $this->marge_haute + 70, $html, 0, 1);
-
-		// Bank account of the invoices, for a payment by transfer
-		if (isModEnabled('bank') && getDolGlobalInt('FACTURE_RIB_NUMBER') > 0) {
-			require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/account.class.php';
-			$account = new Account($this->db);
-			if ($account->fetch(getDolGlobalInt('FACTURE_RIB_NUMBER')) > 0) {
-				pdf_bank($pdf, $outputlangs, $this->marge_gauche, $pdf->GetY() + 4, $account, 0, $fontsize);
-			}
+		// Credit notes and discounts of the customer not used yet, read by the core: to deduct before paying
+		$credit = (float) $object->getAvailableDiscounts();
+		$creditnotes = (int) $object->getOpenCreditNotesNotYetConvertedIntoDiscount();
+		if ($credit > 0 || $creditnotes > 0) {
+			$html .= '<p>'.($credit > 0 ? $outputlangs->trans('DunningCreditAvailable', price($credit, 0, $outputlangs, 1, -1, -1, $conf->currency)).' ' : '');
+			$html .= ($creditnotes > 0 ? $outputlangs->trans('DunningCreditNotesOpen', (string) $creditnotes) : '').'</p>';
 		}
+		$html .= '<p>'.$outputlangs->trans($prefix.'Closing').'</p><p>'.dolPrintLabel($mysoc->name).'</p>';
 
-		$pdf->setAutoPageBreak(false);	// The footer is written in the bottom margin
-		pdf_pagefoot($pdf, $outputlangs, '', $mysoc, $this->marge_basse, $this->marge_gauche, $this->page_hauteur, $object, 0, 1);
-		$pdf->Close();
-		$pdf->Output($file, 'F');
-		dolChmod($file);
-		$this->result = array('fullpath' => $file);
-
-		return 1;
+		return $html;
 	}
 }

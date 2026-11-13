@@ -1,5 +1,22 @@
 # CHANGELOG MODULE DUNNING FOR [DOLIBARR ERP CRM](https://www.dolibarr.org)
 
+## 1.6.0
+
+- Email templates of the module with their own type (Reminders): the reminder jobs of Dolibarr no longer send them. The module only sends its own templates (column `module`), never one that another user created with the same label; an administrator adopts a template of this type in the setup, which lists the templates, their language and their levels. The activation upgrades the templates of 1.5.0 (type, and the new texts when unchanged).
+- Formal notice attached to an email: the invoices and the total of the email; "despite our previous reminders" only after a reminder; the subject of the default template gives the total with the penalties.
+- Nothing is sent from the module, by hand too, while the reminder job of Dolibarr is enabled, with a banner on the list and on the tab.
+- Mass action: never a level set to be sent by hand; the confirmation gives the number of invoices and their total, or says that a promise or an exclusion is for all the invoices of the customer.
+- Statement and formal notice: the discounts and credit notes of the customer not used yet; with a payment schedule, each installment at its age and the penalties on the late ones only; direct debits in progress marked.
+- Online payment links only with an online payment module and the security key.
+- List: a work list (amount reminded, no "not due" column, a note on what it leaves out), a warning for a customer with credits; a banner when the job is disabled.
+- Tab: the real reason why an invoice is not reminded, with a link; automatic / by hand / before the first run / job disabled; the other invoices of a grouped email; "Open a dispute".
+- Exclusion of a customer: an event on the customer.
+- One email per customer, level and recipients. The events of an email are recorded each on its own. A customer without email is a warning; an email sent without the PDF of an invoice is a warning on the page and an error of the job.
+- With a payment schedule: never more than the rest to pay of the invoice; schedules that can not be read stop the reminders with an error.
+- The date of the first run of the job is kept when the module is disabled for an update.
+- Texts: help of the penalties without a dated rate; "Days late" in the table; event "Reminder level ... sent by email".
+- Second review: the warnings of a sending by hand (customer without email, missing PDF) are shown on the page; a request of direct debit of an installment marked on the statement; one file of formal notice per email (its first invoice in the name), none overwritten the same day; at the activation, a level on a template that is not of the module gets a copy of it as a template of the module ("… (Relances N)"); "Adopt" needs the token of the session; "the other invoices of the email" only those with the same recipients.
+
 ## 1.5.0
 
 - Aged balance in the list of the customers (not due, 1-30, 31-60, 61-90 and over 90 days late) of the invoices in the reminder circuit, with a total line.

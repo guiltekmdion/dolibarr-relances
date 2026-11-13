@@ -82,7 +82,7 @@ class modDunning extends DolibarrModules
 		$this->editor_squarred_logo = '';					// Must be image filename into the module/img directory followed with @modulename. Example: 'myimage.png@dunning'
 
 		// Possible values for version are: 'development', 'experimental', 'dolibarr', 'dolibarr_deprecated', 'experimental_deprecated' or a version string like 'x.y.z'
-		$this->version = '1.5.0';
+		$this->version = '1.6.0';
 		// Url to the file with your last numberversion of this module
 		//$this->url_last_version = 'http://www.example.com/versionmodule.txt';
 
@@ -139,6 +139,7 @@ class modDunning extends DolibarrModules
 			/* BEGIN MODULEBUILDER HOOKSCONTEXTS */
 			'hooks' => array(
 				'index',	// Line of the customers to remind on the dashboard of the home page
+				'emailtemplates',	// Type of the email templates of the module in the page of the email templates
 			),
 			/* END MODULEBUILDER HOOKSCONTEXTS */
 			// Set this to 1 if features of module are opened to external users
@@ -187,10 +188,10 @@ class modDunning extends DolibarrModules
 		// Example: $this->const=array(1 => array('DUNNING_MYNEWCONST1', 'chaine', 'myvalue', 'This is a constant to add', 1),
 		//                             2 => array('DUNNING_MYNEWCONST2', 'chaine', 'myvalue', 'This is another constant to add', 0, 'current', 1)
 		// );
-		// No enable constant: the status of the scheduled job is the switch. The date of the first run is deleted with the module,
-		// so a module enabled again does not send the levels reached meanwhile.
+		// No enable constant: the status of the scheduled job is the switch. The date of the first run is kept when the module is disabled:
+		// an update asks to disable and enable the module again, the reminders go on.
 		$this->const = array(
-			0 => array('DUNNING_START_DATE', 'chaine', '', 'Date of the first run of the job: the levels reached before are sent by hand', 0, 'current', 1),
+			0 => array('DUNNING_START_DATE', 'chaine', '', 'Date of the first run of the job: the levels reached before are sent by hand', 0, 'current', 0),
 		);
 
 		// Some keys to add into the overwriting translation tables
@@ -534,7 +535,8 @@ class modDunning extends DolibarrModules
 		// The email templates once (one deleted by the user does not come back), then the default levels on the first activation
 		dol_include_once('/dunning/class/dunning.class.php');
 		$dunning = new Dunning($this->db);
-		if ((!getDolGlobalInt('DUNNING_TEMPLATES_INIT') && $dunning->initTemplates() < 0) || ($user instanceof User && $dunning->initDefaultLevels($user) < 0)) {	// No user when enabled from the command line
+		if ((!getDolGlobalInt('DUNNING_TEMPLATES_INIT') && $dunning->initTemplates() < 0) || $dunning->upgradeTemplates() < 0
+			|| ($user instanceof User && $dunning->initDefaultLevels($user) < 0)) {	// No user when enabled from the command line
 			$this->error = $dunning->error;
 			return -1;
 		}

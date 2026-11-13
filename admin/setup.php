@@ -108,6 +108,13 @@ if (!is_array($levels)) {
 
 include DOL_DOCUMENT_ROOT.'/core/actions_setmoduleoptions.inc.php';
 
+if ($action == 'adopt' && GETPOST('token', 'alphanohtml') === currentToken()) {	// An administrator chooses a template of the type of the module: the module sends it from then on
+	$result = $dunning->adoptTemplate($user, GETPOSTINT('templateid'));
+	setEventMessages($result > 0 ? $langs->trans('RecordSaved') : ($dunning->error ?: $langs->trans('DunningTemplateNotAdoptable')), null, ($result > 0 ? 'mesgs' : 'errors'));
+	header('Location: '.$_SERVER['PHP_SELF']);
+	exit;
+}
+
 if ($action == 'savelevels') {
 	$labels = GETPOST('label', 'array:alphanohtml');
 	$nbdays = GETPOST('nbdays', 'array:int');
@@ -155,12 +162,15 @@ foreach ((array) $invoice->liste_type_contact('external', 'position', 2, 1) as $
 	$types[$typeid] = $type['label'];
 	$billingtype = ($type['code'] == 'BILLING' ? $typeid : $billingtype);
 }
+$alltemplates = $dunning->getModuleTemplates();
+if (!is_array($alltemplates)) {
+	setEventMessages($dunning->error, null, 'errors');
+	$alltemplates = array();
+}
 $templates = array();
-$formmail = new FormMail($db);
-$formmail->fetchAllEMailTemplate('facture_send', $user, null, 1);
-foreach ($formmail->lines_model as $template) {
-	if (empty($template->private)) {	// The scheduled job does not see the private templates of a user
-		$templates[$template->id] = $langs->trans(preg_replace('/\(|\)/', '', $template->label)).($template->lang ? ' ('.$template->lang.')' : '');
+foreach ($alltemplates as $id => $template) {
+	if ($template->module == 'dunning') {	// Only the templates of the module are sent, never one that any user can change
+		$templates[$id] = $langs->trans(preg_replace('/\(|\)/', '', $template->label)).($template->lang ? ' ('.$template->lang.')' : '');
 	}
 }
 
@@ -171,9 +181,7 @@ print load_fiche_titre($langs->trans('DunningSetup'), $linkback, 'title_setup');
 $head = dunningAdminPrepareHead();
 print dol_get_fiche_head($head, 'settings', $langs->trans('DunningSetup'), -1, 'dunning@dunning');
 
-$job = new Cronjob($db);
-$job->fetch(0, 'Dunning', 'sendReminders');
-if ($job->status != Cronjob::STATUS_ENABLED) {
+if (!$dunning->isJobEnabled()) {
 	print info_admin($langs->trans('JobMustBeEnabledFirst', $langs->transnoentitiesnoconv('DunningJob'), '<a href="'.DOL_URL_ROOT.'/cron/list.php">'.$langs->transnoentitiesnoconv('CronList').'</a>'), 0, 0, 'warning');
 }
 if ($dunning->isCoreJobEnabled()) {
@@ -206,6 +214,8 @@ foreach ($levels as $id => $level) {
 	if ($id > 0 && empty($level->template_label)) {
 		$langs->load('errors');
 		print ' '.img_warning($langs->trans('ErrorFailedToFindEmailTemplate', (string) $level->fk_email_template));
+	} elseif ($id > 0 && !isset($templates[$level->fk_email_template])) {
+		print ' '.img_warning($langs->transnoentitiesnoconv('DunningTemplateNotModule'));
 	}
 	print '</td>';
 	print '<td class="center"><input type="checkbox" name="active['.$id.']" value="1"'.($level->active ? ' checked' : '').'></td>';
@@ -214,6 +224,40 @@ foreach ($levels as $id => $level) {
 print '</table></div>';
 print '<div class="opacitymedium">'.$langs->trans('DunningKeysHelp').'</div>';
 print '<div class="center"><input type="submit" class="button button-save" value="'.$langs->trans('Save').'"></div>';
+print '</form>';
+
+// The templates sent, by label and language, and the templates of the type of the module that an administrator can adopt
+print '<br>';
+print load_fiche_titre($langs->trans('DunningTemplates'), '', '');
+print '<div class="opacitymedium">'.$langs->trans('DunningTemplatesHelp', $langs->transnoentitiesnoconv('DunningTemplateType')).'</div>';
+print '<form method="POST" action="'.$_SERVER['PHP_SELF'].'">';
+print '<input type="hidden" name="token" value="'.newToken().'">';
+print '<input type="hidden" name="action" value="adopt">';
+print '<div class="div-table-responsive-no-min"><table class="noborder centpercent">';
+print '<tr class="liste_titre"><td>'.$langs->trans('Label').'</td><td>'.$langs->trans('Language').'</td><td>'.$langs->trans('Topic').'</td>';
+print '<td>'.$langs->trans('DunningLevels').'</td><td></td></tr>';
+$owner = new User($db);
+foreach ($alltemplates as $id => $template) {	// The templates of the reminders: a few, one query each for the owner of a template to adopt
+	$used = array();
+	foreach ($levels as $levelid => $level) {
+		if ($levelid > 0 && $level->template_label === $template->label) {
+			$used[] = $level->label;
+		}
+	}
+	print '<tr class="oddeven"><td>'.dolPrintLabel($template->label).'</td><td>'.dolPrintLabel((string) $template->lang).'</td><td>'.dolPrintLabel((string) $template->topic).'</td>';
+	print '<td>'.dolPrintLabel(implode(', ', $used)).'</td><td class="right">';
+	if ($template->module == 'dunning') {
+		print $langs->trans('DunningTemplateSent');
+	} else {
+		print ($template->fk_user > 0 && $owner->fetch((int) $template->fk_user) > 0 ? '<span class="opacitymedium">'.dolPrintLabel($langs->transnoentitiesnoconv('DunningTemplateOwner', $owner->getFullName($langs))).'</span> ' : '');
+		print '<button type="submit" class="button smallpaddingimp" name="templateid" value="'.((int) $id).'">'.$langs->trans('DunningAdoptTemplate').'</button>';
+	}
+	print '</td></tr>';
+}
+if (empty($alltemplates)) {
+	print '<tr><td colspan="5"><span class="opacitymedium">'.$langs->trans('None').'</span></td></tr>';
+}
+print '</table></div>';
 print '</form>';
 
 print dol_get_fiche_end();

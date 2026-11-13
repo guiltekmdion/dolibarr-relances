@@ -105,7 +105,8 @@ if ($reshook < 0) {
 if (empty($reshook) && $action == 'confirm_send' && $confirm == 'yes' && $permissiontosend && $row && $row->due) {
 	$rows = $dunning->getEmailGroup($user, $row);	// With a level of one email per customer, its other invoices due at this level too
 	$result = (is_array($rows) ? $dunning->send($user, $rows) : -1);
-	setEventMessages($result < 0 ? $dunning->error : dol_nl2br($dunning->output), $dunning->errors, ($result ? 'errors' : 'mesgs'));
+	$messages = array_merge($dunning->errors, $dunning->warnings);	// No email of the customer, missing PDF of an invoice
+	setEventMessages($result < 0 ? $dunning->error : dol_nl2br($dunning->output), $messages, ($result ? 'errors' : ($messages ? 'warnings' : 'mesgs')));
 	header('Location: '.$_SERVER['PHP_SELF'].'?id='.$object->id);
 	exit;
 }
@@ -136,6 +137,7 @@ if (empty($reshook) && $action == 'confirm_penaltyinvoice' && $confirm == 'yes' 
  */
 
 $form = new Form($db);
+$jobenabled = $dunning->isJobEnabled();
 $recipients = ($row ? $dunning->getRecipients(array($row)) : array());
 $to = (is_array($recipients) && !empty($recipients[$object->id]) ? implode(', ', $recipients[$object->id]) : '');
 $events = $dunning->getEvents(array($object->id));
@@ -151,7 +153,26 @@ dol_banner_tab($object, 'ref', $linkback, 1, 'ref', 'ref', $morehtmlref, '', 0, 
 print dol_get_fiche_end();
 
 if ($action == 'send' && $row && $row->due) {
-	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('SendRemindByMail'), dolPrintLabel($langs->transnoentitiesnoconv('ConfirmDunningRemindNow', $row->next->label, $to)), 'confirm_send', '', 0, 1);
+	$group = $dunning->getEmailGroup($user, $row);	// A level of one email per customer: the other invoices of the email
+	$recipients = (is_array($group) ? $dunning->getRecipients($group) : -1);
+	$others = array();
+	if (is_array($recipients)) {	// Same recipients only, as send() groups them
+		$mine = $recipients[$row->id];
+		sort($mine);
+		foreach ($group as $id => $other) {
+			$theirs = $recipients[$id];
+			sort($theirs);
+			if ($id != $row->id && $theirs == $mine) {
+				$others[] = $other->ref;
+			}
+		}
+	}
+	$question = dolPrintLabel($langs->transnoentitiesnoconv('ConfirmDunningRemindNow', $row->next->label, $to));
+	$question .= ($others ? '<br>'.dolPrintLabel($langs->transnoentitiesnoconv('DunningAlsoInvoices', implode(', ', $others))) : '');
+	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('SendRemindByMail'), $question, 'confirm_send', '', 0, 1);
+}
+if ($dunning->isCoreJobEnabled()) {	// Nothing can be sent from the module
+	print info_admin($langs->trans('DunningCoreJobEnabled', $langs->transnoentitiesnoconv('SendEmailsRemindersOnInvoiceDueDate')), 0, 0, 'warning');
 }
 if ($action == 'promise' && $row) {
 	$formquestion = array(
@@ -168,15 +189,17 @@ if ($action == 'penaltyinvoice' && $row) {
 }
 
 print '<div class="fichecenter"><table class="border tableforfield centpercent">';
-if (!$row) {
-	print '<tr><td><span class="opacitymedium">'.$langs->trans('DunningNotReminded').'</span></td></tr>';
+if (!$row) {	// The real reason, and the page to change it
+	$reason = $dunning->getNotRemindedReason($user, $object);
+	print '<tr><td><span class="opacitymedium">'.dolPrintLabel($reason['text']).'</span>';
+	print ($reason['url'] ? ' <a href="'.dolPrintHTMLForAttributeUrl($reason['url']).'">'.dolPrintLabel($reason['link']).'</a>' : '').'</td></tr>';
 } else {
 	print '<tr><td class="titlefield">'.$langs->trans('DunningLevelReached').'</td><td>';
 	print ($row->last ? dolPrintLabel($row->last->label).' <span class="opacitymedium">'.dol_print_date($row->lastdate, 'dayhour').'</span>' : '').'</td></tr>';
 	print '<tr><td>'.$langs->trans('DunningNextReminder').'</td><td>';
 	if ($row->next) {
 		print ($row->due ? img_warning().' ' : '').dolPrintLabel($row->next->label).' <span class="opacitymedium">'.dol_print_date($row->nextdate, 'day');
-		print ' ('.($row->auto ? $langs->trans('Automatic') : $langs->trans('DunningByHand')).')</span>';
+		print ' ('.$langs->trans($row->next->byhand ? 'DunningByHand' : (!$row->auto ? 'DunningBeforeFirstRun' : ($jobenabled ? 'Automatic' : 'DunningJobOff'))).')</span>';
 	}
 	print '</td></tr>';
 	if ($row->installment !== '') {	// Payment schedule of the module Echeances: the installment reminded
@@ -214,7 +237,7 @@ if ($row && !$row->penaltyinvoice && $amounts['penalties'] + $amounts['indemnity
 	print dolGetButtonAction('', $langs->trans('DunningCreatePenaltyInvoice'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=penaltyinvoice&token='.newToken(), '', $permissiontowrite && $user->hasRight('facture', 'creer'));
 }
 if ($object->dispute_status != 1) {
-	print dolGetButtonAction('', $langs->trans('DunningDoNotRemind'), 'default', DOL_URL_ROOT.'/compta/facture/card.php?facid='.$object->id.'&action=editdispute_status&token='.newToken(), '', $user->hasRight('facture', 'creer'));
+	print dolGetButtonAction('', $langs->trans('DunningOpenDispute'), 'default', DOL_URL_ROOT.'/compta/facture/card.php?facid='.$object->id.'&action=editdispute_status&token='.newToken(), '', $user->hasRight('facture', 'creer'));
 }
 print '</div>';
 

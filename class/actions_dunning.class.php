@@ -20,14 +20,14 @@ declare(strict_types=1);
 /**
  * \file    dunning/class/actions_dunning.class.php
  * \ingroup dunning
- * \brief   Hooks of the module Reminders: the customers to remind on the dashboard of the home page
+ * \brief   Hooks of the module Reminders: the customers to remind on the dashboard of the home page, the type of its email templates
  */
 
 require_once DOL_DOCUMENT_ROOT.'/core/class/commonhookactions.class.php';
 
 
 /**
- * Hooks of the module Reminders (context index)
+ * Hooks of the module Reminders (contexts index and emailtemplates)
  */
 class ActionsDunning extends CommonHookActions
 {
@@ -84,6 +84,26 @@ class ActionsDunning extends CommonHookActions
 			$group['stats'][] = 'dunning';
 			$this->results = array('facture' => $group);
 		}
+
+		return 0;
+	}
+
+	/**
+	 * Type of the email templates of the module in the page of the email templates (context emailtemplates)
+	 *
+	 * @param	array<string,mixed>	$parameters		Hook parameters, with elementList
+	 * @param	?CommonObject		$object			Not used
+	 * @param	string				$action			Not used
+	 * @param	HookManager			$hookmanager	Hook manager
+	 * @return	int								0
+	 */
+	public function emailElementlist($parameters, &$object, &$action, $hookmanager)
+	{
+		global $langs;
+
+		dol_include_once('/dunning/class/dunning.class.php');
+		$langs->load('dunning@dunning');
+		$this->results = array(Dunning::TEMPLATE_TYPE => img_picto('', 'fa-bell', 'class="pictofixedwidth"').dol_escape_htmltag($langs->trans('DunningTemplateType')));
 
 		return 0;
 	}

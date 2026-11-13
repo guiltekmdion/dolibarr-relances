@@ -88,6 +88,7 @@ $search_sale = GETPOSTINT('search_sale');
 $search_amount = GETPOST('search_amount', 'alpha');
 $search_due = GETPOSTINT('search_due');
 $agings = Dunning::AGINGS;
+unset($agings['aging_notdue']);	// A list of the work to do on late invoices, not a balance of all the invoices to pay
 if (!in_array($sortfield, array_merge(array('socname', 'nb', 'remain', 'leveldate', 'promise', 'nextdate'), array_keys($agings)))) {
 	$sortfield = 'nextdate';
 }
@@ -123,7 +124,7 @@ if ($permissiontosend) {
 if ($permissiontowrite) {
 	$arrayofmassactions['prepromise'] = $langs->trans('DunningPromise');
 	if (isModEnabled('category') && getDolGlobalInt('DUNNING_EXCLUDED_CATEGORY') > 0 && $user->hasRight('societe', 'creer')) {
-		$arrayofmassactions['predonotremind'] = $langs->trans('DunningDoNotRemind');
+		$arrayofmassactions['predonotremind'] = $langs->trans('DunningExcludeCustomer');
 	}
 }
 
@@ -158,17 +159,13 @@ if (empty($reshook) && $confirm == 'yes' && $permissiontowrite && in_array($acti
 		$result = $dunning->excludeThirdparties($user, array_column($rows, 'socid'));
 		$dunning->output = $langs->trans('RecordSaved');
 	} else {
-		foreach ($rows as $id => $row) {
-			if (!$row->due) {	// Manual levels are allowed here: this is the decision of a human
-				unset($rows[$id]);
-			}
-		}
-		$result = $dunning->send($user, $rows, ($action == 'confirm_summary' ? 1 : 0));
+		$result = $dunning->send($user, $dunning->getMassSendable($rows), ($action == 'confirm_summary' ? 1 : 0));
 	}
 	if ($result < 0) {
 		setEventMessages($dunning->error, $dunning->errors, 'errors');
 	} else {
-		setEventMessages(dol_nl2br($dunning->output), $dunning->errors, ($dunning->errors ? 'warnings' : 'mesgs'));
+		$messages = array_merge($dunning->errors, $dunning->warnings);	// No email of the customer, missing PDF of an invoice
+		setEventMessages(dol_nl2br($dunning->output), $messages, ($messages ? 'warnings' : 'mesgs'));
 	}
 	header('Location: '.$_SERVER['PHP_SELF'].'?'.ltrim($param, '&'));
 	exit;
@@ -232,14 +229,29 @@ if ($massaction && $permissiontowrite) {
 		array('type' => 'date', 'name' => 'promisedate', 'label' => $langs->trans('Date'), 'value' => dol_now()),
 		array('type' => 'text', 'name' => 'promisenote', 'label' => $langs->trans('Note')),
 	);
-	print $form->formconfirm($_SERVER['PHP_SELF'], $arrayofmassactions[$massaction], $langs->trans('DunningConfirmMassAction', count($toselect)), 'confirm_'.preg_replace('/^pre/', '', $massaction), ($massaction == 'prepromise' ? $promisequestions : array()), 1, 0, 200, 500, 1);
+	$question = $langs->trans('DunningConfirmMassAction', count($toselect));
+	if ($massaction == 'preremind' || $massaction == 'presummary') {	// What will go: the invoices and their total, never the levels sent by hand
+		$selected = $dunning->getInvoices($user, dol_now(), $toselect, $search_sale);
+		$selected = (is_array($selected) ? $dunning->getMassSendable($selected) : array());
+		$question = $langs->trans('DunningConfirmMassSend', count($selected), price(array_sum(array_column($selected, 'remain')), 0, $langs, 1, -1, -1, $conf->currency), count($toselect));
+	} elseif ($massaction == 'prepromise') {
+		$question = $langs->trans('DunningConfirmMassPromise', count($toselect));
+	} elseif ($massaction == 'predonotremind') {
+		$question = $langs->trans('DunningConfirmMassExclude', count($toselect));
+	}
+	print $form->formconfirm($_SERVER['PHP_SELF'], $arrayofmassactions[$massaction], $question, 'confirm_'.preg_replace('/^pre/', '', $massaction), ($massaction == 'prepromise' ? $promisequestions : array()), 1, 0, 200, 500, 1);
+}
+if ($dunning->isCoreJobEnabled()) {	// Nothing can be sent from the module
+	print info_admin($langs->trans('DunningCoreJobEnabled', $langs->transnoentitiesnoconv('SendEmailsRemindersOnInvoiceDueDate')), 0, 0, 'warning');
+} elseif (!$dunning->isJobEnabled()) {
+	print info_admin($langs->trans('DunningJobDisabled'), 0, 0, 'info');
 }
 
 $moreforfilter = '<div class="divsearchfield">'.$langs->trans('DunningLevelReached').': '.$form->selectarray('search_level', $levellabels, $search_level, 1, 0, 0, '', 0, 0, 0, '', 'maxwidth200').'</div>';
 if ($user->hasRight('user', 'user', 'lire')) {
 	$moreforfilter .= '<div class="divsearchfield">'.$langs->trans('SalesRepresentatives').': '.$formother->select_salesrepresentatives($search_sale, 'search_sale', $user, 0, 1, 'maxwidth200').'</div>';
 }
-$moreforfilter .= '<div class="divsearchfield">'.$langs->trans('RemainderToPay').' &gt;= <input type="text" class="width75" name="search_amount" value="'.dolPrintHTMLForAttribute($search_amount).'"></div>';
+$moreforfilter .= '<div class="divsearchfield">'.$langs->trans('DunningAmountReminded').' &gt;= <input type="text" class="width75" name="search_amount" value="'.dolPrintHTMLForAttribute($search_amount).'"></div>';
 $moreforfilter .= '<div class="divsearchfield"><input type="checkbox" id="search_due" name="search_due" value="1"'.($search_due ? ' checked' : '').'> <label for="search_due">'.$langs->trans('DunningCustomersToRemind').'</label></div>';
 print '<div class="liste_titre liste_titre_bydiv centpercent">'.$moreforfilter.'</div>';
 
@@ -253,7 +265,7 @@ print '<td class="liste_titre center maxwidthsearch">'.$form->showFilterButtons(
 print '<tr class="liste_titre">';
 print_liste_field_titre('Customer', $_SERVER['PHP_SELF'], 'socname', '', $param, '', $sortfield, $sortorder);
 print_liste_field_titre('Invoices', $_SERVER['PHP_SELF'], 'nb', '', $param, '', $sortfield, $sortorder, 'right ');
-print_liste_field_titre('RemainderToPay', $_SERVER['PHP_SELF'], 'remain', '', $param, '', $sortfield, $sortorder, 'right ');
+print_liste_field_titre('DunningAmountReminded', $_SERVER['PHP_SELF'], 'remain', '', $param, '', $sortfield, $sortorder, 'right ');
 foreach ($agings as $key => $label) {
 	print_liste_field_titre($label, $_SERVER['PHP_SELF'], $key, '', $param, '', $sortfield, $sortorder, 'right ');
 }
@@ -266,12 +278,15 @@ print $hookmanager->resPrint;
 print_liste_field_titre($massactionbutton ? $form->showCheckAddButtons('checkforselect', 1) : '', $_SERVER['PHP_SELF'], '', '', '', '', $sortfield, $sortorder, 'center maxwidthsearch ');
 print '</tr>';
 
-foreach ($customers as $customer) {
+foreach ($customers as $customer) {	// The credits of the customers of the page, 2 queries of the core each: bounded by the page
 	$societe->id = $customer['socid'];
 	$societe->name = $customer['socname'];
 	$societe->client = 1;
+	$credit = (float) $societe->getAvailableDiscounts();
+	$creditnotes = (int) $societe->getOpenCreditNotesNotYetConvertedIntoDiscount();
+	$warning = ($credit > 0 ? $langs->transnoentitiesnoconv('DunningCustomerCredit', price($credit, 0, $langs, 1, -1, -1, $conf->currency)).' ' : '').($creditnotes > 0 ? $langs->transnoentitiesnoconv('DunningCustomerCreditNotes', (string) $creditnotes) : '');
 	print '<tr class="oddeven">';
-	print '<td class="tdoverflowmax200">'.$societe->getNomUrl(1, 'customer').'</td>';
+	print '<td class="tdoverflowmax200">'.$societe->getNomUrl(1, 'customer').($warning !== '' ? ' '.img_warning($warning) : '').'</td>';
 	print '<td class="right">'.$customer['nb'].'</td>';
 	print '<td class="right amount">'.price($customer['remain'], 0, $langs, 1, -1, -1, $conf->currency).'</td>';
 	foreach (array_keys($agings) as $key) {
@@ -303,6 +318,7 @@ if ($num == 0) {
 }
 print '</table>';
 print '</div>';
+print '<div class="opacitymedium">'.$langs->trans('DunningListHelp').'</div>';
 print '</form>';
 
 llxFooter();

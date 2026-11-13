@@ -30,6 +30,7 @@ require_once dirname(__FILE__).'/../../core/modules/modDunning.class.php';
 require_once dirname(__FILE__).'/../../class/dunning.class.php';
 require_once dirname(__FILE__).'/../../class/actions_dunning.class.php';
 require_once dirname(__FILE__).'/../../core/substitutions/functions_dunning.lib.php';
+require_once dirname(__FILE__).'/../../core/modules/societe/doc/pdf_dunningnotice.modules.php';
 require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/prelevement/class/bonprelevement.class.php';
 
@@ -180,10 +181,10 @@ class DunningTest extends CommonClassTest
 
 		$module = new modDunning($db);
 
-		$this->assertSame(array('1.5.0', 'Guiltek', array('index'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
+		$this->assertSame(array('1.6.0', 'Guiltek', array('index', 'emailtemplates'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
 		$this->assertTrue((bool) $db->query("SELECT rowid FROM ".$db->prefix()."dunning_level"), 'Enabling the module creates its table: '.$db->lasterror());
 		$this->assertSame(0, $module->cronjobs[0]['status']);
-		$this->assertSame(array('DUNNING_START_DATE', 1), array($module->const[0][0], $module->const[0][6]), 'A module enabled again does not send the past');
+		$this->assertSame(array('DUNNING_START_DATE', 0), array($module->const[0][0], $module->const[0][6]), 'Kept when the module is disabled for an update: the reminders go on');
 	}
 
 	/**
@@ -593,16 +594,17 @@ class DunningTest extends CommonClassTest
 			$this->assertSame($emails, $recipients[$ids[$key]], $key);
 		}
 
-		// No email at all, or emails disabled: an error each and no event, as an email is sent before its event is recorded
+		// No email at all: a warning, not an error of the job every day; emails disabled: an error. No event, as an email is sent before its event is recorded
 		$opened = $db->transaction_opened;
-		$this->assertSame(2, $dunning->send($user, array($rows[$ids['no email']], $rows[$ids['email of the customer']])));
+		$this->assertSame(1, $dunning->send($user, array($rows[$ids['no email']], $rows[$ids['email of the customer']])));
+		$this->assertCount(1, $dunning->warnings);
 		$this->assertSame(array(), $dunning->getEvents(array($ids['no email'], $ids['email of the customer'])));
 		$this->assertSame($opened, $db->transaction_opened);
 
-		// One email for the invoices of a customer: the recipients of each invoice, from a list keyed from 0 as the tab of the invoice sends
+		// One email per customer and per recipients: the contacts of two invoices each get their own invoice, from a list keyed from 0 as the tab sends
 		$hook = $this->captureMails();
 		$this->assertSame(0, $dunning->send($user, array($rows[$ids['contact of the invoice']], $rows[$ids['default contact of the customer']]), 1));
-		$this->assertSame(array('invoice@example.com,default@example.com|(PROV'.$ids['contact of the invoice'].'), (PROV'.$ids['default contact of the customer'].')'), $hook->mails);
+		$this->assertSame(array('invoice@example.com|(PROV'.$ids['contact of the invoice'].')', 'default@example.com|(PROV'.$ids['default contact of the customer'].')'), $hook->mails);
 	}
 
 	/**
@@ -619,9 +621,9 @@ class DunningTest extends CommonClassTest
 		$id = $this->createInvoice($socid, -1);
 		$dunning = new Dunning($this->savdb);
 		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
-		$this->assertSame(1, $dunning->send($this->savuser, array($rows[$id])));
-		$this->assertStringContainsString('DUNNINGTEST', $dunning->errors[0]);
-		$this->assertStringNotContainsString('<span', $dunning->errors[0]);
+		$this->assertSame(0, $dunning->send($this->savuser, array($rows[$id])));
+		$this->assertStringContainsString('DUNNINGTEST', $dunning->warnings[0]);
+		$this->assertStringNotContainsString('<span', $dunning->warnings[0]);
 	}
 
 	/**
@@ -696,7 +698,7 @@ class DunningTest extends CommonClassTest
 		$this->createLevels(array(0));
 		$levels = (new Dunning($db))->fetchLevels();
 		$label = reset($levels)->template_label;
-		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."c_email_templates (entity, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content) VALUES (1, 'facture_send', 0, '".$db->idate(dol_now())."', '".$db->escape($label)."', 'fr_FR', 990, '1', 1, 'Relance __REF__', 0, 'Contenu')"), (string) $db->lasterror());
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."c_email_templates (entity, module, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content) VALUES (1, 'dunning', '".Dunning::TEMPLATE_TYPE."', 0, '".$db->idate(dol_now())."', '".$db->escape($label)."', 'fr_FR', 990, '1', 1, 'Relance __REF__', 0, 'Contenu')"), (string) $db->lasterror());
 		$fr = $this->createCustomer('fr@example.com', 'fr_FR');
 		$de = $this->createCustomer('de@example.com', 'de_DE');
 		$idfr = $this->createInvoice($fr, -1);
@@ -954,7 +956,7 @@ class DunningTest extends CommonClassTest
 		$this->assertSame(0, $dunning->initTemplates(), 'Run again like at each activation: the templates already there are kept');
 		$this->assertTrue((bool) $db->query("DELETE FROM ".$db->prefix()."c_email_templates WHERE entity = ".((int) $conf->entity)." AND module = 'dunning' AND lang = 'en_US'"));
 		$this->assertSame(3, $dunning->initTemplates(), 'Only the missing ones');
-		$this->assertSame(6, $this->countRows($count));
+		$this->assertSame(6, $this->countRows($count." AND type_template = '".Dunning::TEMPLATE_TYPE."'"), 'Of the type of the module');
 
 		$reader = clone $this->savuser;
 		$reader->admin = 0;
@@ -1329,8 +1331,8 @@ class DunningTest extends CommonClassTest
 		$hook = $this->captureMails();
 		$ids = array();
 		foreach (array('fr_FR' => 'Relance FR', 'en_US' => 'Reminder EN') as $lang => $topic) {
-			$sql = "INSERT INTO ".$db->prefix()."c_email_templates (entity, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content)";
-			$sql .= " VALUES (1, 'facture_send', 0, '".$db->idate(dol_now())."', 'DUNNINGTEST nolang', '".$db->escape($lang)."', 990, '1', 1, '".$db->escape($topic)."', 0, '__DUNNING_INVOICES__')";
+			$sql = "INSERT INTO ".$db->prefix()."c_email_templates (entity, module, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content)";
+			$sql .= " VALUES (1, 'dunning', '".Dunning::TEMPLATE_TYPE."', 0, '".$db->idate(dol_now())."', 'DUNNINGTEST nolang', '".$db->escape($lang)."', 990, '1', 1, '".$db->escape($topic)."', 0, '__DUNNING_INVOICES__')";
 			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
 			$ids[$lang] = $db->last_insert_id($db->prefix().'c_email_templates');
 		}
@@ -1602,6 +1604,481 @@ class DunningTest extends CommonClassTest
 	}
 
 	/**
+	 * A user without rights creates public templates with the label of a level by the page of the core (no module, position 0): never sent.
+	 * An administrator adopts a template of the type of the module, which is sent from then on.
+	 *
+	 * @return void
+	 */
+	public function testDunningTemplateHijack()
+	{
+		$db = $this->savdb;
+		$p = $db->prefix();
+		$hook = $this->captureMails();
+		$this->createLevels(array(0));
+		$dunning = new Dunning($db);
+		$levels = $dunning->fetchLevels();
+		$level = reset($levels);
+		$ids = array();
+		foreach (array('fr_FR' => Dunning::TEMPLATE_TYPE, 'en_US' => 'all', 'de_DE' => 'facture_send') as $lang => $type) {
+			$sql = "INSERT INTO ".$p."c_email_templates (entity, type_template, fk_user, private, datec, label, lang, position, enabled, active, topic, joinfiles, content)";
+			$sql .= " VALUES (1, '".$db->escape($type)."', ".((int) $this->savuser->id).", 0, '".$db->idate(dol_now())."', '".$db->escape($level->template_label)."', '".$db->escape($lang)."', 0, '1', 1, 'RIB MODIFIE', 0, 'Nouveau RIB')";
+			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+			$ids[$lang] = (int) $db->last_insert_id($p.'c_email_templates');
+		}
+		$fr = $this->createInvoice($this->createCustomer('hijackfr@example.com', 'fr_FR'), -1);
+		$en = $this->createInvoice($this->createCustomer('hijacken@example.com', 'en_US'), -1);
+		$de = $this->createInvoice($this->createCustomer('hijackde@example.com', 'de_DE'), -1);
+
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array(), 0, $fr) + $dunning->getInvoices($this->savuser, dol_now(), array(), 0, $en) + $dunning->getInvoices($this->savuser, dol_now(), array(), 0, $de);
+		$this->assertSame(0, $dunning->send($this->savuser, $rows), implode(', ', $dunning->errors));
+		$this->assertSame(array('hijackfr@example.com|(PROV'.$fr.')', 'hijacken@example.com|(PROV'.$en.')', 'hijackde@example.com|(PROV'.$de.')'), $hook->mails, 'The template of the module, whatever the language');
+
+		$reader = clone $this->savuser;
+		$reader->admin = 0;
+		$this->assertSame(-1, $dunning->adoptTemplate($reader, $ids['fr_FR']), 'Only an administrator');
+		$this->assertSame(0, $dunning->adoptTemplate($this->savuser, $ids['en_US']), 'Not of the type of the module');
+		$this->assertSame(0, $dunning->adoptTemplate($this->savuser, $ids['de_DE']), 'Not of the type of the module');
+		$this->assertSame(1, $dunning->adoptTemplate($this->savuser, $ids['fr_FR']), (string) $dunning->error);
+		$this->assertSame(0, $dunning->adoptTemplate($this->savuser, $ids['fr_FR']), 'Already adopted');
+		$this->assertSame(0, $this->countRows("SELECT COUNT(rowid) as nb FROM ".$p."c_email_templates WHERE rowid = ".$ids['fr_FR']." AND fk_user IS NOT NULL"), 'No owner: only an administrator can change it');
+		$frlangs = new Translate('', $GLOBALS['conf']);
+		$frlangs->setDefaultLang('fr_FR');
+		$tpl = (new Dunning($db))->getTemplate($level, $frlangs, $this->savuser);
+		$this->assertSame(array($ids['fr_FR'], 'RIB MODIFIE'), array((int) $tpl->id, $tpl->topic), 'Adopted: sent to the customers of its language');
+		$this->assertArrayHasKey($ids['fr_FR'], $dunning->getModuleTemplates());
+		$this->assertArrayNotHasKey($ids['de_DE'], $dunning->getModuleTemplates(), 'Only the templates of the module and of its type');
+	}
+
+	/**
+	 * The templates of the module have their own type: the reminder jobs of the core (template parameter empty or 0, first template of the invoices
+	 * by position) never take them. An activation gives the type to the templates of 1.5.0 and the new texts to the texts not changed by the user;
+	 * before it, the templates of the module of type facture_send are still sent. The type is shown in the page of the email templates.
+	 *
+	 * @return void
+	 */
+	public function testDunningTemplateType()
+	{
+		global $conf, $langs, $hookmanager;
+
+		$db = $this->savdb;
+		$p = $db->prefix();
+		$where = " WHERE entity = ".((int) $conf->entity)." AND module = 'dunning'";
+		$this->assertSame(6, $this->countRows("SELECT COUNT(rowid) as nb FROM ".$p."c_email_templates".$where." AND type_template = '".Dunning::TEMPLATE_TYPE."'"), 'Created with the type of the module');
+		$others = array();
+		$resql = $db->query("SELECT rowid FROM ".$p."c_email_templates WHERE active = 1 AND type_template IN ('facture_send', 'all') AND (module IS NULL OR module <> 'dunning')");
+		while ($resql && ($obj = $db->fetch_object($resql))) {
+			$others[] = (int) $obj->rowid;
+		}
+		if ($others) {	// No other template of the invoices, like a setup with the templates of the module only
+			$this->assertTrue((bool) $db->query("UPDATE ".$p."c_email_templates SET active = 0 WHERE rowid IN (".implode(',', $others).")"));
+		}
+		$tpl = (new FormMail($db))->getEMailTemplate($db, 'facture_send', $this->savuser, $langs, 0);
+		$this->assertSame('', (string) $tpl->module, 'The reminder job of the core with an empty template: not a template of the module');
+		if ($others) {
+			$this->assertTrue((bool) $db->query("UPDATE ".$p."c_email_templates SET active = 1 WHERE rowid IN (".implode(',', $others).")"));
+		}
+
+		// A template of 1.5.0 before the module is enabled again: still sent, then upgraded if its text was not changed
+		$dunning = new Dunning($db);
+		$old = "label = 'Relances - 3 Mise en demeure / Formal notice' AND lang = 'fr_FR'";
+		$sql = "UPDATE ".$p."c_email_templates SET type_template = 'facture_send', topic = 'Mise en demeure de payer : __DUNNING_TOTAL_REMAIN__'".$where." AND ".$old;
+		$this->assertTrue((bool) $db->query($sql));
+		$this->assertTrue((bool) $db->query("UPDATE ".$p."c_email_templates SET content = 'Mon texte'".$where." AND label = 'Relances - 1 Courtoisie / Courtesy' AND lang = 'en_US'"));
+		$resql = $db->query("SELECT rowid, content FROM ".$p."c_email_templates".$where." AND ".$old);
+		$notice = $db->fetch_object($resql);
+		$level = (object) array('rowid' => 0, 'fk_email_template' => (int) $notice->rowid, 'template_label' => '');
+		$this->assertSame((int) $notice->rowid, (int) $dunning->getTemplate($level, $langs, $this->savuser, false)->id, 'Type facture_send of 1.5.0: still sent before the activation');
+		$this->assertSame(2, $dunning->upgradeTemplates(), (string) $dunning->error);
+		$this->assertSame(1, $this->countRows("SELECT COUNT(rowid) as nb FROM ".$p."c_email_templates".$where." AND ".$old." AND type_template = '".Dunning::TEMPLATE_TYPE."' AND topic = 'Mise en demeure de payer : __DUNNING_TOTAL_WITH_PENALTIES__'"), 'Its type and its new subject');
+		$this->assertSame(1, $this->countRows("SELECT COUNT(rowid) as nb FROM ".$p."c_email_templates".$where." AND label = 'Relances - 1 Courtoisie / Courtesy' AND lang = 'en_US' AND content = 'Mon texte'"), 'A text changed by the user is kept');
+		$this->assertSame(0, $dunning->upgradeTemplates(), 'Nothing more');
+
+		$actions = new ActionsDunning($db);
+		$object = null;
+		$action = '';
+		$this->assertSame(0, $actions->emailElementlist(array(), $object, $action, $hookmanager));
+		$this->assertArrayHasKey(Dunning::TEMPLATE_TYPE, $actions->results);
+	}
+
+	/**
+	 * Upgrade from 1.5.0: a level on a template that is not of the module (of the core, of a user) gets a copy of it as a template of the
+	 * module, once; the template itself is not changed
+	 *
+	 * @return void
+	 */
+	public function testDunningUpgradeLevelTemplate()
+	{
+		$db = $this->savdb;
+		$p = $db->prefix();
+		$sql = "INSERT INTO ".$p."c_email_templates (entity, module, type_template, lang, private, label, position, enabled, active, topic, joinfiles, content)";
+		$sql .= " VALUES (1, 'facture', 'facture_send', '', 0, 'DUNNINGTEST core template', 5, '1', 1, 'DUNNINGTEST topic', 1, 'DUNNINGTEST content')";
+		$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+		$core = (int) $db->last_insert_id($p.'c_email_templates');
+		$dunning = new Dunning($db);
+		$level = array('rowid' => 0, 'label' => 'DUNNINGTEST level on a core template', 'nbdays' => 3, 'fk_c_type_contact' => 0, 'percustomer' => 0, 'fk_email_template' => $core, 'active' => 1);
+		$levelid = $dunning->saveLevel($this->savuser, $level);
+		$this->assertGreaterThan(0, $levelid, $dunning->error);
+
+		$this->assertGreaterThan(0, $dunning->upgradeTemplates(), $dunning->error);
+		$copy = $this->countRows("SELECT fk_email_template as nb FROM ".$p."dunning_level WHERE rowid = ".((int) $levelid));
+		$this->assertNotEquals($core, $copy, 'The level is on a copy');
+		$resql = $db->query("SELECT module, type_template, topic, content, joinfiles FROM ".$p."c_email_templates WHERE rowid = ".((int) $copy));
+		$obj = $db->fetch_object($resql);
+		$this->assertSame(array('dunning', Dunning::TEMPLATE_TYPE, 'DUNNINGTEST topic', 'DUNNINGTEST content', 1), array($obj->module, $obj->type_template, $obj->topic, $obj->content, (int) $obj->joinfiles));
+		$this->assertSame(1, $this->countRows("SELECT COUNT(rowid) as nb FROM ".$p."c_email_templates WHERE rowid = ".$core." AND module = 'facture' AND type_template = 'facture_send'"), 'The core template kept');
+		$dunning->upgradeTemplates();
+		$this->assertSame(1, $this->countRows("SELECT COUNT(rowid) as nb FROM ".$p."c_email_templates WHERE label LIKE 'DUNNINGTEST core template (Relances%'"), 'Copied once');
+	}
+
+	/**
+	 * The formal notice attached to an email asks for the invoices and the total of the email, not for all the late invoices of the customer;
+	 * "despite our previous reminders" only after a reminder; the subject gives the total with the penalties
+	 *
+	 * @return void
+	 */
+	public function testDunningNoticeOfTheEmail()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree(dol_now(), -60, 'd', 0, 'tzserver');
+		$hook = $this->captureMails();
+		$levels = $this->createLevels(array(0), array('joinnotice' => 1, 'percustomer' => 1));
+		$socid = $this->createCustomer('noticegroup@example.com');
+		$due = $this->createInvoice($socid, -10);
+		$promised = $this->createInvoice($socid, -10);
+		$dunning = new Dunning($db);
+		$this->assertSame(1, $dunning->addPromise($this->savuser, array($dunning->getInvoices($this->savuser, dol_now(), array(), 0, $promised)[$promised]), dol_time_plus_duree(dol_now(), 5, 'd', 0, 'tzserver'), ''));
+
+		$this->assertSame(0, $dunning->sendReminders(), implode(', ', $dunning->errors));
+		$this->assertCount(1, $hook->paths);
+		$this->assertStringContainsString('PROV'.$due, basename($hook->paths[0][0]), 'One file per email, named by its first invoice');
+		$pdf = (string) file_get_contents($hook->paths[0][0]);
+		$keywords = function ($text) {
+			return '(PROV'.$text.')';
+		};
+		$found = function ($pdf, $text) {
+			return strpos($pdf, $text) !== false || strpos($pdf, mb_convert_encoding($text, 'UTF-16BE', 'UTF-8')) !== false;
+		};
+		$this->assertTrue($found($pdf, $keywords($due)), 'The invoice of the email');
+		$this->assertFalse($found($pdf, $keywords($promised)), 'Not the promised one');
+
+		$notice = new pdf_dunningnotice($db);
+		$soc = new Societe($db);
+		$soc->fetch($socid);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid), 0, 0);
+		$first = $notice->getLetter($soc, array($rows[$promised]), $langs, dol_now());
+		$this->assertStringContainsString($langs->trans('DunningNoticeIntroFirst'), $first, 'Never reminded');
+		$this->assertStringContainsString($langs->trans('DunningNoticeIntro'), $notice->getLetter($soc, array($rows[$due]), $langs, dol_now()), 'Reminded before');
+		$this->assertSame($levels[0], $rows[$due]->last->rowid);
+		$this->assertSame('Mise en demeure de payer : __DUNNING_TOTAL_WITH_PENALTIES__', array_column($this->templatesOfModule(), 'topic', 'label')['Relances - 3 Mise en demeure / Formal notice'] ?? '');
+	}
+
+	/**
+	 * Nothing is sent from the module while the reminder job of the core is enabled, by hand too
+	 *
+	 * @return void
+	 */
+	public function testDunningCoreJobSend()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$hook = $this->captureMails();
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('corejobsend@example.com');
+		$id = $this->createInvoice($socid, -1);
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."cronjob (entity, datec, jobtype, label, objectname, methodename, status) VALUES (".((int) $conf->entity).", '".$db->idate(dol_now())."', 'method', 'DUNNINGTEST core job', 'Facture', 'sendEmailsRemindersOnInvoiceDueDate', 1)"));
+		$dunning = new Dunning($db);
+
+		$this->assertSame(-1, $dunning->send($this->savuser, $dunning->getInvoices($this->savuser, dol_now(), array($socid))));
+		$this->assertSame($langs->trans('DunningCoreJobEnabled', $langs->transnoentitiesnoconv('SendEmailsRemindersOnInvoiceDueDate')), $dunning->error);
+		$this->assertSame(array(), $hook->mails);
+		$this->assertSame(array(), $dunning->getEvents(array($id)));
+	}
+
+	/**
+	 * A mass action never sends a level set to be sent by hand; a level reached before the first run of the job goes
+	 *
+	 * @return void
+	 */
+	public function testDunningMassSendable()
+	{
+		$byhand = $this->createLevels(array(10), array('byhand' => 1));
+		$auto = $this->createLevels(array(0, 30));
+		$socid = $this->createCustomer('mass@example.com');
+		$early = $this->createInvoice($socid, -3);
+		$late = $this->createInvoice($socid, -12);
+		$this->addSentEvent($late, $socid, $auto[0], dol_time_plus_duree(dol_now(), -12, 'd', 0, 'tzserver'));
+		$notdue = $this->createInvoice($socid, -12);	// Its next level, automatic, in 18 days
+		$this->addSentEvent($notdue, $socid, $auto[0], dol_time_plus_duree(dol_now(), -12, 'd', 0, 'tzserver'));
+		$this->addSentEvent($notdue, $socid, $byhand[10], dol_time_plus_duree(dol_now(), -2, 'd', 0, 'tzserver'));
+		$this->createInvoice($socid, 5);
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame(array($byhand[10], false), array($rows[$late]->next->rowid, $rows[$late]->auto));
+		$this->assertFalse($rows[$early]->auto, 'Reached before the first run');
+		$this->assertSame(array($auto[30], false), array($rows[$notdue]->next->rowid, $rows[$notdue]->due));
+
+		$this->assertSame(array($early), array_keys($dunning->getMassSendable($rows)));
+	}
+
+	/**
+	 * The credit notes and discounts of the customer not used yet are written in the letter (statement and formal notice)
+	 *
+	 * @return void
+	 */
+	public function testDunningCredits()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('credits@example.com');
+		$id = $this->createInvoice($socid, -5);
+		$dunning = new Dunning($db);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$soc = new Societe($db);
+		$soc->fetch($socid);
+		$notice = new pdf_dunningnotice($db);
+		$text = $langs->trans('DunningCreditAvailable', price(50, 0, $langs, 1, -1, -1, $conf->currency));
+		$this->assertStringNotContainsString($text, $notice->getLetter($soc, $rows, $langs, dol_now()));
+
+		$sql = "INSERT INTO ".$db->prefix()."societe_remise_except (entity, fk_soc, discount_type, datec, amount_ht, amount_tva, amount_ttc, tva_tx, fk_user, description)";
+		$sql .= " VALUES (1, ".((int) $socid).", 0, '".$db->idate(dol_now())."', 50, 0, 50, 0, ".((int) $this->savuser->id).", 'DUNNINGTEST')";
+		$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+		$this->createInvoice($socid, -5, 'type = '.Facture::TYPE_CREDIT_NOTE);	// Validated credit note, not converted into a discount
+		$letter = $notice->getLetter($soc, $rows, $langs, dol_now());
+		$this->assertStringContainsString($text, $letter);
+		$this->assertStringContainsString($langs->trans('DunningCreditNotesOpen', '1'), $letter);
+		$this->assertArrayHasKey($id, $rows);
+	}
+
+	/**
+	 * The references link to the online payment page only with an online payment module and the security key; the days late have a unit
+	 *
+	 * @return void
+	 */
+	public function testDunningPayOnlineLink()
+	{
+		global $conf, $langs;
+
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('payonline@example.com');
+		$this->createInvoice($socid, -2);
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$savmodules = $conf->modules;
+		$savtoken = getDolGlobalString('PAYMENT_SECURITY_TOKEN');
+		$cases = array('no module, no key' => array(false, '', false), 'key only' => array(false, 'secret', false), 'module only' => array(true, '', false), 'both' => array(true, 'secret', true));
+		foreach ($cases as $label => $case) {
+			unset($conf->modules['stripe'], $conf->modules['paypal']);	// The online payment modules of the core
+			if ($case[0]) {
+				$conf->modules['stripe'] = 'stripe';
+			}
+			$conf->global->PAYMENT_SECURITY_TOKEN = $case[1];
+			$table = $dunning->getSubstitutions($rows, reset($rows)->next, $langs, dol_now())['__DUNNING_INVOICES__'];
+			$this->assertSame($case[2], strpos($table, '<a href=') !== false, $label);
+			$this->assertSame($case[2], strpos($table, $langs->trans('DunningPayOnline')) !== false, $label);
+			$this->assertSame($case[2], strpos($table, 'securekey=') !== false, $label);
+		}
+		$this->assertStringContainsString('<th>'.$langs->trans('DunningDaysLate').'</th>', $table);
+		$conf->modules = $savmodules;
+		$conf->global->PAYMENT_SECURITY_TOKEN = $savtoken;
+	}
+
+	/**
+	 * Why an invoice is not reminded, and where to change it; excluding a customer leaves an event on it
+	 *
+	 * @return void
+	 */
+	public function testDunningNotRemindedReason()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$user = $this->savuser;
+		$this->createLevels(array(0));
+		$socid = $this->createCustomer('reason@example.com');
+		$excluded = $this->createCustomer('reasonexcluded@example.com');
+		$ids = array(
+			'paid' => $this->createInvoice($socid, -5, 'paye = 1'),
+			'dispute' => $this->createInvoice($socid, -5, 'dispute_status = 1'),
+			'debit' => $this->createInvoice($socid, -5),
+			'excluded' => $this->createInvoice($excluded, -5),
+		);
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$db->prefix()."prelevement_demande (entity, fk_facture, sourcetype, amount, date_demande, traite, fk_user_demande) VALUES (1, ".((int) $ids['debit']).", 'facture', 120, '".$db->idate(dol_time_plus_duree(dol_now(), -200, 'd', 0, 'tzserver'))."', 0, ".((int) $user->id).")"));
+		$category = new Categorie($db);
+		$category->label = 'DUNNINGTEST reason';
+		$category->type = Categorie::TYPE_CUSTOMER;
+		$this->assertGreaterThan(0, $category->create($user), (string) $category->error);
+		$conf->global->DUNNING_EXCLUDED_CATEGORY = $category->id;
+		$dunning = new Dunning($db);
+		$this->assertSame(1, $dunning->excludeThirdparties($user, array($excluded)), $dunning->error);
+		$this->assertSame(1, $dunning->excludeThirdparties($user, array($excluded)));
+		$events = "SELECT COUNT(id) as nb FROM ".$db->prefix()."actioncomm WHERE code = '".Dunning::CODE_EXCLUDED."' AND fk_soc = ".((int) $excluded);
+		$this->assertSame(1, $this->countRows($events), 'One trace on the customer, not again when already excluded');
+
+		$reasons = array();
+		foreach ($ids as $key => $id) {
+			$invoice = new Facture($db);
+			$invoice->fetch($id);
+			$this->assertArrayNotHasKey($id, $dunning->getInvoices($user, dol_now(), array(), 0, $id), $key);
+			$reasons[$key] = $dunning->getNotRemindedReason($user, $invoice);
+		}
+		$this->assertSame($langs->transnoentitiesnoconv('DunningReasonNotToPay'), $reasons['paid']['text']);
+		$this->assertSame($langs->transnoentitiesnoconv('DunningReasonDispute'), $reasons['dispute']['text']);
+		$this->assertStringContainsString('action=editdispute_status', $reasons['dispute']['url']);
+		$this->assertSame($langs->transnoentitiesnoconv('DunningReasonDirectDebit', dol_print_date(dol_time_plus_duree(dol_now(), -200, 'd', 0, 'tzserver'), 'day'), '200'), $reasons['debit']['text']);
+		$this->assertStringContainsString('/compta/facture/prelevement.php?facid='.$ids['debit'], $reasons['debit']['url']);
+		$this->assertSame($langs->transnoentitiesnoconv('DunningReasonExcluded', 'DUNNINGTEST reason'), $reasons['excluded']['text']);
+		$this->assertStringContainsString('socid='.$excluded, $reasons['excluded']['url']);
+	}
+
+	/**
+	 * An email sent without the PDF of an invoice: a warning on the page, an error of the job
+	 *
+	 * @return void
+	 */
+	public function testDunningMissingPdf()
+	{
+		global $conf;
+
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree(dol_now(), -30, 'd', 0, 'tzserver');
+		$hook = $this->captureMails();
+		$this->createLevels(array(0), array(), array('joinfiles' => 1));
+		$byhand = $this->createInvoice($this->createCustomer('nopdfhand@example.com'), -1);
+		$dunning = new Dunning($this->savdb);
+
+		$this->assertSame(0, $dunning->send($this->savuser, $dunning->getInvoices($this->savuser, dol_now(), array(), 0, $byhand)));
+		$this->assertCount(1, $hook->mails, 'Sent');
+		$this->assertCount(1, $dunning->warnings);
+		$this->assertSame(array(), $dunning->errors);
+		$this->assertStringNotContainsString('PROV'.$byhand, $dunning->output, 'Not in the message of success');
+
+		$job = $this->createInvoice($this->createCustomer('nopdfjob@example.com'), -1);
+		$this->assertSame(1, $dunning->sendReminders());
+		$this->assertCount(2, $hook->mails, 'Sent');
+		$this->assertStringContainsString('PROV'.$job, implode(',', $dunning->errors));
+		$this->assertStringContainsString('PROV'.$job, $dunning->error);
+	}
+
+	/**
+	 * With a payment schedule: the statement shows each installment at its own age and counts the penalties on the late ones only; an invoice
+	 * lowered under its schedule is never asked for more than its rest to pay; a direct debit in progress is marked on the statement;
+	 * schedules that can not be read stop the reminders
+	 *
+	 * @return void
+	 */
+	public function testDunningStatementInstallments()
+	{
+		global $conf, $langs;
+
+		$db = $this->savdb;
+		$p = $db->prefix();
+		foreach (array(
+			"CREATE TEMPORARY TABLE ".$p."installments_schedule (rowid integer, element varchar(32), fk_element integer, billing integer)",
+			"CREATE TEMPORARY TABLE ".$p."installments_line (rowid integer, fk_schedule integer, rang integer, date_due date, amount numeric(24,8), status integer, fk_mode_reglement integer, fk_prelevement_demande integer)",
+		) as $sql) {
+			$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
+		}
+		$savmodule = $conf->modules['installments'] ?? null;
+		$conf->modules['installments'] = 'installments';
+		$now = dol_now();
+		$today = dol_get_first_hour($now);
+		$socid = $this->createCustomer('stmtinst@example.com');
+		$this->assertTrue((bool) $db->query("UPDATE ".$p."societe SET tva_intra = 'FR00123456789' WHERE rowid = ".((int) $socid)));
+		$this->createLevels(array(0));
+		$conf->global->DUNNING_PENALTY_RATE = '10';
+		$schedules = array('statement' => array(-40 => 40, 10 => 40, 40 => 40), 'lowered' => array(-20 => 100, -5 => 100, 40 => 100), 'short' => array(-40 => 40, 10 => 40));
+		$ids = array();
+		$n = 0;
+		foreach ($schedules as $key => $lines) {
+			$ids[$key] = $this->createInvoice($socid, -40);	// 120
+			$this->assertTrue((bool) $db->query("INSERT INTO ".$p."installments_schedule VALUES (".(990100 + $n).", 'facture', ".((int) $ids[$key]).", 0)"));
+			foreach ($lines as $days => $amount) {
+				$date = substr($db->idate(dol_time_plus_duree($today, $days, 'd')), 0, 10);
+				$this->assertTrue((bool) $db->query("INSERT INTO ".$p."installments_line VALUES (".(990200 + $n * 10 + $days + 50).", ".(990100 + $n).", 0, '".$date."', ".((float) $amount).", 0, 0, NULL)"));
+			}
+			$n++;
+		}
+		$dunning = new Dunning($db);
+
+		$all = $dunning->getInvoices($this->savuser, $now, array($socid), 0, 0, true);
+		$row = $all[$ids['statement']];
+		$this->assertSame(120.0, $row->remain, 'The whole invoice in the statement');
+		$this->assertSame(array('aging_notdue' => 80.0, 'aging_30' => 0.0, 'aging_60' => 40.0, 'aging_90' => 0.0, 'aging_more' => 0.0), $dunning->getAging(array($row), $now), 'Each installment at its age');
+		$this->assertSame(0.44, $dunning->getPenalties($row, $now)['penalties'], '40 x 10 % x 40 / 365, not on the 80 not due');
+		$this->assertSame(80.0, $dunning->getAging(array($all[$ids['short']]), $now)['aging_notdue'], 'What the schedule misses goes to its last installment');
+
+		$row = $dunning->getInvoices($this->savuser, $now, array($socid))[$ids['lowered']];
+		$this->assertSame(array(120.0, 120.0), array($row->remain, $row->mc_installments), 'Never more than the rest to pay of the invoice');
+
+		$this->assertTrue((bool) $db->query("INSERT INTO ".$p."prelevement_demande (entity, fk_facture, sourcetype, amount, date_demande, traite, fk_user_demande) VALUES (1, ".((int) $ids['statement']).", 'facture', 40, '".$db->idate($now)."', 0, ".((int) $this->savuser->id).")"));
+		$all = $dunning->getInvoices($this->savuser, $now, array($socid), 0, 0, true);
+		$this->assertGreaterThan(0, $all[$ids['statement']]->debitinprogress);
+		$table = $dunning->getSubstitutions($all, $row->next, $langs, $now)['__DUNNING_INVOICES__'];
+		$this->assertSame(1, substr_count($table, $langs->trans('DunningDirectDebitInProgress')));
+		$this->assertStringContainsString($langs->trans('DunningDirectDebitNoTransfer'), $table);
+		$request = $this->countRows("SELECT MAX(rowid) as nb FROM ".$p."prelevement_demande WHERE fk_facture = ".((int) $ids['statement']));	// Made by the module Echeances for an installment: in progress too
+		$this->assertTrue((bool) $db->query("UPDATE ".$p."installments_line SET fk_prelevement_demande = ".$request." WHERE fk_schedule IN (SELECT rowid FROM ".$p."installments_schedule WHERE fk_element = ".((int) $ids['statement']).")"));
+		$all = $dunning->getInvoices($this->savuser, $now, array($socid), 0, 0, true);
+		$this->assertGreaterThan(0, $all[$ids['statement']]->debitinprogress, 'Request of an installment: marked on the statement');
+
+		$drop = ($db->type == 'pgsql' ? "DROP TABLE " : "DROP TEMPORARY TABLE ");	// Without TEMPORARY, MySQL commits the transaction of the tests
+		$this->assertTrue((bool) $db->query($drop.$p."installments_line"));
+		$this->assertTrue((bool) $db->query($drop.$p."installments_schedule"));
+		$hook = $this->captureMails();
+		$conf->global->DUNNING_START_DATE = dol_time_plus_duree($now, -60, 'd', 0, 'tzserver');
+		$this->assertTrue((bool) $db->query("SAVEPOINT dunningtest"));	// PostgreSQL stops the transaction of the tests at the failed reading
+		$this->assertSame(-1, $dunning->getInvoices($this->savuser, $now, array($socid)), 'Schedules not read: nothing as a whole');
+		$this->assertStringStartsWith(explode('%s', $langs->trans('DunningErrorInstallments'))[0], $dunning->error);
+		$this->assertTrue((bool) $db->query("ROLLBACK TO SAVEPOINT dunningtest"));
+		$this->assertSame(1, $dunning->sendReminders($now));
+		$this->assertSame(array(), $hook->mails);
+		$this->assertTrue((bool) $db->query("ROLLBACK TO SAVEPOINT dunningtest"));
+		unset($conf->modules['installments']);
+		if ($savmodule !== null) {
+			$conf->modules['installments'] = $savmodule;
+		}
+	}
+
+	/**
+	 * Status of the scheduled job of the module: disabled at the activation
+	 *
+	 * @return void
+	 */
+	public function testDunningJobEnabled()
+	{
+		$db = $this->savdb;
+		$dunning = new Dunning($db);
+		$this->assertFalse($dunning->isJobEnabled());
+		$job = "UPDATE ".$db->prefix()."cronjob SET status = %d WHERE objectname = 'Dunning' AND methodename = 'sendReminders'";
+		$this->assertTrue((bool) $db->query(sprintf($job, 1)));
+		$this->assertTrue($dunning->isJobEnabled());
+		$this->assertTrue((bool) $db->query(sprintf($job, 0)));
+	}
+
+	/**
+	 * Templates of the module of the current entity
+	 *
+	 * @return array<int,stdClass>	Templates (label, lang, topic)
+	 */
+	private function templatesOfModule()
+	{
+		global $conf;
+
+		$resql = $this->savdb->query("SELECT label, lang, topic FROM ".$this->savdb->prefix()."c_email_templates WHERE entity = ".((int) $conf->entity)." AND module = 'dunning' AND lang = 'fr_FR'");
+		$this->assertTrue((bool) $resql);
+		$templates = array();
+		while ($obj = $this->savdb->fetch_object($resql)) {
+			$templates[] = $obj;
+		}
+
+		return $templates;
+	}
+
+	/**
 	 * Replace the sending of emails by a hook that records them
 	 *
 	 * @return CommonHookActions	Hook, with the recipients and subject of each email in ->mails, its files in ->files, its body in ->bodies
@@ -1686,8 +2163,8 @@ class DunningTest extends CommonClassTest
 		$db = $this->savdb;
 		$template = array_merge(array('topic' => '__REF__', 'joinfiles' => 0, 'content' => '__DUNNING_INVOICES__'), $template);
 		$label = 'DUNNINGTEST '.(++$this->nbtemplates);	// A label of its own: the templates have a unique key on entity, label and language
-		$sql = "INSERT INTO ".$db->prefix()."c_email_templates (entity, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content)";
-		$sql .= " VALUES (1, 'facture_send', 0, '".$db->idate(dol_now())."', '".$db->escape($label)."', '', 990, '1', 1, '".$db->escape((string) $template['topic'])."', ".((int) $template['joinfiles']).", '".$db->escape((string) $template['content'])."')";
+		$sql = "INSERT INTO ".$db->prefix()."c_email_templates (entity, module, type_template, private, datec, label, lang, position, enabled, active, topic, joinfiles, content)";
+		$sql .= " VALUES (1, 'dunning', '".Dunning::TEMPLATE_TYPE."', 0, '".$db->idate(dol_now())."', '".$db->escape($label)."', '', 990, '1', 1, '".$db->escape((string) $template['topic'])."', ".((int) $template['joinfiles']).", '".$db->escape((string) $template['content'])."')";
 		$this->assertTrue((bool) $db->query($sql), (string) $db->lasterror());
 		$template = $db->last_insert_id($db->prefix().'c_email_templates');
 		$dunning = new Dunning($db);
