@@ -1569,6 +1569,70 @@ class Dunning
 	}
 
 	/**
+	 * Record a reminder sent outside the module (by hand, by phone, by post): the same memory as a reminder sent, without email.
+	 * The reminders then go on from the next level.
+	 *
+	 * @param	User		$user		User recording
+	 * @param	stdClass	$row		Invoice as returned by getInvoices()
+	 * @param	int			$levelid	Rowid of the level sent
+	 * @param	int			$date		Day it was sent, today or before
+	 * @return	int			1 if recorded, 0 if this level is already recorded for the invoice, <0 if KO
+	 */
+	public function recordReminder(User $user, stdClass $row, $levelid, $date)
+	{
+		global $langs;
+
+		$langs->load('dunning@dunning');
+		if (!$user->hasRight('dunning', 'write')) {
+			$this->error = $langs->trans('NotEnoughPermissions');
+			return -1;
+		}
+		if (!$date || dol_get_first_hour((int) $date) > dol_get_first_hour(dol_now())) {	// No date, or a day after today
+			$langs->load('errors');
+			$this->error = $langs->trans('ErrorDateMustBeBeforeToday');
+			return -1;
+		}
+		$levels = $this->fetchLevels();
+		if (!is_array($levels)) {
+			return -1;
+		}
+		if (!isset($levels[$levelid])) {
+			$this->error = $langs->trans('ErrorRecordNotFound');
+			return -1;
+		}
+		$code = self::CODE_PREFIX.((int) $levelid).self::CODE_SENT_SUFFIX;
+		$events = $this->getEvents(array($row->id));
+		if (!is_array($events)) {
+			return -1;
+		}
+		foreach ($events as $event) {
+			if ($event->code == $code && $this->isSameInstallment($event, $row->installment)) {
+				return 0;
+			}
+		}
+		$event = new ActionComm($this->db);
+		$event->type_code = 'AC_OTH_AUTO';
+		$event->code = $code;
+		$event->label = $langs->transnoentities('DunningRecordedLabel', $levels[$levelid]->label);
+		$event->extraparams = ($row->installment !== '' ? array('installment' => $row->installment) : null);	// Encoded by ActionComm::create()
+		$event->socid = $row->socid;
+		$event->fk_project = $row->fk_projet;
+		$event->elementtype = 'invoice';
+		$event->elementid = $row->id;
+		$event->datep = (int) $date;
+		$event->datef = $event->datep;
+		$event->percentage = -1;
+		$event->authorid = $user->id;
+		$event->userownerid = $user->id;
+		if ($event->create($user) < 0) {
+			$this->error = $event->error;
+			return -1;
+		}
+
+		return 1;
+	}
+
+	/**
 	 * Stop the reminders of thirdparties: add them to the excluded customer category of the setup
 	 *
 	 * @param	User	$user		User excluding

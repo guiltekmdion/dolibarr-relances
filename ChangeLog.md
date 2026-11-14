@@ -1,5 +1,9 @@
 # CHANGELOG MODULE DUNNING FOR [DOLIBARR ERP CRM](https://www.dolibarr.org)
 
+## 1.7.0
+
+- Tab of an invoice: "Record a reminder already sent" for a reminder sent outside the module (by hand, by phone, by post): the level and the day, no email. The reminders go on from the next level, after the gap; a level is recorded once per invoice (and installment).
+
 ## 1.6.0
 
 - Email templates of the module with their own type (Reminders): the reminder jobs of Dolibarr no longer send them. The module only sends its own templates (column `module`), never one that another user created with the same label; an administrator adopts a template of this type in the setup, which lists the templates, their language and their levels. The activation upgrades the templates of 1.5.0 (type, and the new texts when unchanged).

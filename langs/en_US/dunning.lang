@@ -157,3 +157,7 @@ DunningTemplateOwner=created by %s
 DunningAdoptTemplate=Adopt
 DunningTemplateNotAdoptable=This template can not be adopted: it must be public, of the type of the module, and not adopted yet.
 DunningTemplateNotModule=This template is not a template of the module: it is never sent. Choose a template of the module, or adopt this one in the list of the templates below.
+DunningRecordReminder=Record a reminder already sent
+DunningRecordReminderHelp=A reminder sent outside the module (by hand, by phone, by post): nothing is sent, the reminders go on from the next level.
+DunningRecordedLabel=Reminder level "%s" sent outside the module
+DunningAlreadyRecorded=This level is already recorded for this invoice

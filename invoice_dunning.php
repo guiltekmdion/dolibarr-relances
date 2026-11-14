@@ -120,6 +120,13 @@ if (empty($reshook) && $action == 'confirm_promise' && $confirm == 'yes' && $per
 	header('Location: '.$_SERVER['PHP_SELF'].'?id='.$object->id);
 	exit;
 }
+if (empty($reshook) && $action == 'confirm_record' && $confirm == 'yes' && $permissiontowrite && $row) {
+	// Noon of the day in the time zone of the server, like the dates of the reminders: the same day for every reader
+	$result = $dunning->recordReminder($user, $row, GETPOSTINT('recordlevel'), GETPOSTDATE('recorddate', '12:00:00', 'tzserver'));
+	setEventMessages($result < 0 ? $dunning->error : $langs->trans($result ? 'RecordSaved' : 'DunningAlreadyRecorded'), null, ($result < 0 ? 'errors' : 'mesgs'));
+	header('Location: '.$_SERVER['PHP_SELF'].'?id='.$object->id);
+	exit;
+}
 if (empty($reshook) && $action == 'confirm_penaltyinvoice' && $confirm == 'yes' && $permissiontowrite && $user->hasRight('facture', 'creer') && $row) {
 	$penaltyid = $dunning->createPenaltyInvoice($user, $row);
 	if ($penaltyid < 0) {
@@ -182,6 +189,18 @@ if ($action == 'promise' && $row) {
 	);
 	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('DunningPromise'), '', 'confirm_promise', $formquestion, 0, 1);
 }
+if ($action == 'record' && $row) {
+	$levellabels = array();
+	$levels = $dunning->fetchLevels();
+	foreach (is_array($levels) ? $levels : array() as $level) {
+		$levellabels[$level->rowid] = $level->label;
+	}
+	$formquestion = array(
+		array('type' => 'select', 'name' => 'recordlevel', 'label' => $langs->trans('DunningLevelReached'), 'values' => $levellabels, 'default' => ($row->next ? $row->next->rowid : '')),
+		array('type' => 'date', 'name' => 'recorddate', 'label' => $langs->trans('Date'), 'value' => dol_now()),
+	);
+	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('DunningRecordReminder'), $langs->trans('DunningRecordReminderHelp'), 'confirm_record', $formquestion, 0, 1);
+}
 $amounts = ($row ? $dunning->getPenalties($row, dol_now()) : array('days' => 0, 'penalties' => 0.0, 'indemnity' => 0.0));
 if ($action == 'penaltyinvoice' && $row) {
 	$question = $langs->transnoentitiesnoconv('DunningConfirmPenaltyInvoice', price($amounts['penalties'] + $amounts['indemnity'], 0, $langs, 1, -1, -1, $conf->currency));
@@ -232,6 +251,7 @@ if ($row && $row->next) {
 }
 if ($row) {
 	print dolGetButtonAction('', $langs->trans('DunningPromise'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=promise&token='.newToken(), '', $permissiontowrite);
+	print dolGetButtonAction('', $langs->trans('DunningRecordReminder'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=record&token='.newToken(), '', $permissiontowrite);
 }
 if ($row && !$row->penaltyinvoice && $amounts['penalties'] + $amounts['indemnity'] > 0) {
 	print dolGetButtonAction('', $langs->trans('DunningCreatePenaltyInvoice'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=penaltyinvoice&token='.newToken(), '', $permissiontowrite && $user->hasRight('facture', 'creer'));

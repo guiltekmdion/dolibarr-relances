@@ -157,3 +157,7 @@ DunningTemplateOwner=créé par %s
 DunningAdoptTemplate=Adopter
 DunningTemplateNotAdoptable=Ce modèle ne peut pas être adopté : il doit être public, du type du module, et pas encore adopté.
 DunningTemplateNotModule=Ce modèle n'est pas un modèle du module : il ne part jamais. Choisissez un modèle du module, ou adoptez celui-ci dans la liste des modèles plus bas.
+DunningRecordReminder=Noter une relance déjà faite
+DunningRecordReminderHelp=Une relance faite hors du module (à la main, par téléphone, par courrier) : rien n'est envoyé, les relances reprennent au niveau suivant.
+DunningRecordedLabel=Niveau de relance « %s » fait hors du module
+DunningAlreadyRecorded=Ce niveau est déjà noté pour cette facture

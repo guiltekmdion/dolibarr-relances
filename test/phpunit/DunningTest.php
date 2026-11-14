@@ -181,7 +181,7 @@ class DunningTest extends CommonClassTest
 
 		$module = new modDunning($db);
 
-		$this->assertSame(array('1.6.0', 'Guiltek', array('index', 'emailtemplates'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
+		$this->assertSame(array('1.7.0', 'Guiltek', array('index', 'emailtemplates'), 1, array(8, 1)), array($module->version, $module->editor_name, $module->module_parts['hooks'], $module->module_parts['substitutions'], $module->phpmin));
 		$this->assertTrue((bool) $db->query("SELECT rowid FROM ".$db->prefix()."dunning_level"), 'Enabling the module creates its table: '.$db->lasterror());
 		$this->assertSame(0, $module->cronjobs[0]['status']);
 		$this->assertSame(array('DUNNING_START_DATE', 0), array($module->const[0][0], $module->const[0][6]), 'Kept when the module is disabled for an update: the reminders go on');
@@ -436,6 +436,36 @@ class DunningTest extends CommonClassTest
 		$this->assertSame(1, $dunning->addPromise($this->savuser, $rows, $promise, ''), $dunning->error);
 		$customers = $dunning->getCustomers($this->savuser, dol_now());
 		$this->assertSame(array($promise, false), array($customers[$promised]['promise'] ?? 0, $customers[$promised]['due'] ?? null), 'Promised: in the list, nothing due');
+	}
+
+	/**
+	 * A reminder sent outside the module: recorded once without email, the reminders go on from the next level after the gap
+	 *
+	 * @return void
+	 */
+	public function testDunningRecordReminder()
+	{
+		$hook = $this->captureMails();
+		$levels = $this->createLevels(array(0, 10, 20));
+		$socid = $this->createCustomer('record@example.com');
+		$id = $this->createInvoice($socid, -30);
+		$today = dol_get_first_hour(dol_now());
+		$sent = dol_time_plus_duree($today, -3, 'd', 0, 'tzserver');
+		$dunning = new Dunning($this->savdb);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame(array(null, $levels[0]), array($rows[$id]->last, $rows[$id]->next->rowid), 'Never reminded by the module');
+
+		$this->assertSame(-1, $dunning->recordReminder($this->savuser, $rows[$id], $levels[10], dol_time_plus_duree($today, 1, 'd', 0, 'tzserver')), 'A day after today');
+		$this->assertSame(-1, $dunning->recordReminder($this->savuser, $rows[$id], -1, $sent), 'No such level');
+		$this->assertSame(1, $dunning->recordReminder($this->savuser, $rows[$id], $levels[10], $sent), $dunning->error);
+		$this->assertSame(0, $dunning->recordReminder($this->savuser, $rows[$id], $levels[10], $sent), 'Recorded once');
+
+		foreach (array(0 => false, 6 => false, 7 => true) as $days => $due) {
+			$rows = $dunning->getInvoices($this->savuser, dol_time_plus_duree(dol_now(), $days, 'd', 0, 'tzserver'), array($socid));
+			$this->assertSame(array($levels[10], $sent, $levels[20], $due), array($rows[$id]->last->rowid, $rows[$id]->lastdate, $rows[$id]->next->rowid, $rows[$id]->due), 'In '.$days.' days');
+		}
+		$this->assertSame(array(), $hook->mails, 'Nothing sent');
+		$this->assertCount(1, $dunning->getEvents(array($id)));
 	}
 
 	/**
