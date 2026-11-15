@@ -469,6 +469,47 @@ class DunningTest extends CommonClassTest
 	}
 
 	/**
+	 * A phone call: a phone call event with its note, as many as needed, the level does not change and it is not a reminder sent
+	 *
+	 * @return void
+	 */
+	public function testDunningRecordCall()
+	{
+		global $langs;
+
+		$db = $this->savdb;
+		$hook = $this->captureMails();
+		$levels = $this->createLevels(array(0, 10));
+		$socid = $this->createCustomer('call@example.com');
+		$id = $this->createInvoice($socid, -30);
+		$this->addSentEvent($id, $socid, $levels[0], dol_time_plus_duree(dol_now(), -20, 'd', 0, 'tzserver'));
+		$today = dol_get_first_hour(dol_now());
+		$dunning = new Dunning($db);
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$before = array($rows[$id]->last->rowid, $rows[$id]->lastdate, $rows[$id]->next->rowid, $rows[$id]->nextdate, $rows[$id]->due);
+		$reader = clone $this->savuser;
+		$reader->rights = (object) array('dunning' => (object) array('read' => 1));
+
+		$this->assertSame(-1, $dunning->recordReminder($reader, $rows[$id], 0, $today), 'Writing is needed');
+		$this->assertSame(-1, $dunning->recordReminder($this->savuser, $rows[$id], 0, dol_time_plus_duree($today, 1, 'd', 0, 'tzserver')), 'A day after today');
+		$this->assertSame(1, $dunning->recordReminder($this->savuser, $rows[$id], 0, $today, 'Pays on Friday'), $dunning->error);
+		$this->assertSame(1, $dunning->recordReminder($this->savuser, $rows[$id], 0, $today), 'Several calls');
+
+		$rows = $dunning->getInvoices($this->savuser, dol_now(), array($socid));
+		$this->assertSame($before, array($rows[$id]->last->rowid, $rows[$id]->lastdate, $rows[$id]->next->rowid, $rows[$id]->nextdate, $rows[$id]->due), 'The level does not change');
+		$calls = array();
+		$resql = $db->query("SELECT c.code as type, a.label, a.note FROM ".$db->prefix()."actioncomm as a INNER JOIN ".$db->prefix()."c_actioncomm as c ON c.id = a.fk_action WHERE a.elementtype = 'invoice' AND a.fk_element = ".((int) $id)." AND a.code = '".Dunning::CODE_CALL."' ORDER BY a.id");
+		while ($resql && ($obj = $db->fetch_object($resql))) {
+			$calls[] = array($obj->type, $obj->label, (string) $obj->note);
+		}
+		$label = $langs->transnoentities('ActionAC_TEL');
+		$this->assertSame(array(array('AC_TEL', $label.' - Pays on Friday', 'Pays on Friday'), array('AC_TEL', $label, '')), $calls);
+		$this->assertCount(3, $dunning->getEvents(array($id)), 'In the history of the tab');
+		$this->assertSame(1, array_sum(array_column($dunning->getStatistics($this->savuser, $today - 60 * 86400, dol_now())['months'], 'reminders')), 'Not a reminder sent');
+		$this->assertSame(array(), $hook->mails, 'Nothing sent');
+	}
+
+	/**
 	 * Rule 5: no reminder once paid, during a dispute, or for a customer of the excluded category. Only the rest to pay is reminded.
 	 *
 	 * @return void

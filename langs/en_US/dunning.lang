@@ -161,3 +161,5 @@ DunningRecordReminder=Record a reminder already sent
 DunningRecordReminderHelp=A reminder sent outside the module (by hand, by phone, by post): nothing is sent, the reminders go on from the next level.
 DunningRecordedLabel=Reminder level "%s" sent outside the module
 DunningAlreadyRecorded=This level is already recorded for this invoice
+DunningRecordCall=Record a phone call
+DunningRecordCallHelp=A phone call to the customer: it goes in the history and in the agenda, the reminder level does not change.

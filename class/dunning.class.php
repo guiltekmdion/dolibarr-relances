@@ -69,6 +69,11 @@ class Dunning
 	const CODE_EXCLUDED = 'AC_DUNNING_EXCLUDED';
 
 	/**
+	 * Code of the event of a phone call recorded on an invoice: in the history, the level does not change
+	 */
+	const CODE_CALL = 'AC_DUNNING_CALL';
+
+	/**
 	 * Type of the email templates of the module: not 'facture_send', so the reminder jobs of the core never take them.
 	 * The core already knows it as a type of the invoices (FormMail::getEMailTemplate()).
 	 */
@@ -1570,19 +1575,20 @@ class Dunning
 
 	/**
 	 * Record a reminder sent outside the module (by hand, by phone, by post): the same memory as a reminder sent, without email.
-	 * The reminders then go on from the next level.
+	 * The reminders then go on from the next level. Without level, a phone call to the customer: in the history, the level does not change.
 	 *
 	 * @param	User		$user		User recording
 	 * @param	stdClass	$row		Invoice as returned by getInvoices()
-	 * @param	int			$levelid	Rowid of the level sent
+	 * @param	int			$levelid	Rowid of the level sent, 0 for a phone call
 	 * @param	int			$date		Day it was sent, today or before
+	 * @param	string		$note		Note of the event, what was said
 	 * @return	int			1 if recorded, 0 if this level is already recorded for the invoice, <0 if KO
 	 */
-	public function recordReminder(User $user, stdClass $row, $levelid, $date)
+	public function recordReminder(User $user, stdClass $row, $levelid, $date, $note = '')
 	{
 		global $langs;
 
-		$langs->load('dunning@dunning');
+		$langs->loadLangs(array('dunning@dunning', 'commercial'));
 		if (!$user->hasRight('dunning', 'write')) {
 			$this->error = $langs->trans('NotEnoughPermissions');
 			return -1;
@@ -1592,29 +1598,34 @@ class Dunning
 			$this->error = $langs->trans('ErrorDateMustBeBeforeToday');
 			return -1;
 		}
-		$levels = $this->fetchLevels();
-		if (!is_array($levels)) {
-			return -1;
-		}
-		if (!isset($levels[$levelid])) {
-			$this->error = $langs->trans('ErrorRecordNotFound');
-			return -1;
-		}
-		$code = self::CODE_PREFIX.((int) $levelid).self::CODE_SENT_SUFFIX;
-		$events = $this->getEvents(array($row->id));
-		if (!is_array($events)) {
-			return -1;
-		}
-		foreach ($events as $event) {
-			if ($event->code == $code && $this->isSameInstallment($event, $row->installment)) {
-				return 0;
-			}
-		}
 		$event = new ActionComm($this->db);
-		$event->type_code = 'AC_OTH_AUTO';
-		$event->code = $code;
-		$event->label = $langs->transnoentities('DunningRecordedLabel', $levels[$levelid]->label);
-		$event->extraparams = ($row->installment !== '' ? array('installment' => $row->installment) : null);	// Encoded by ActionComm::create()
+		$event->type_code = 'AC_TEL';
+		$event->code = self::CODE_CALL;
+		$event->label = $langs->transnoentities('ActionAC_TEL').($note !== '' ? ' - '.$note : '');	// Cut by ActionComm::create(), the whole note below
+		if ($levelid) {
+			$levels = $this->fetchLevels();
+			if (!is_array($levels)) {
+				return -1;
+			}
+			if (!isset($levels[$levelid])) {
+				$this->error = $langs->trans('ErrorRecordNotFound');
+				return -1;
+			}
+			$event->type_code = 'AC_OTH_AUTO';
+			$event->code = self::CODE_PREFIX.((int) $levelid).self::CODE_SENT_SUFFIX;
+			$event->label = $langs->transnoentities('DunningRecordedLabel', $levels[$levelid]->label);
+			$events = $this->getEvents(array($row->id));
+			if (!is_array($events)) {
+				return -1;
+			}
+			foreach ($events as $sent) {
+				if ($sent->code == $event->code && $this->isSameInstallment($sent, $row->installment)) {
+					return 0;
+				}
+			}
+			$event->extraparams = ($row->installment !== '' ? array('installment' => $row->installment) : null);	// Encoded by ActionComm::create()
+		}
+		$event->note_private = $note;
 		$event->socid = $row->socid;
 		$event->fk_project = $row->fk_projet;
 		$event->elementtype = 'invoice';

@@ -83,12 +83,23 @@ $limit = GETPOSTINT('limit') ?: $conf->liste_limit;
 $sortfield = GETPOST('sortfield', 'aZ09comma');
 $sortorder = GETPOST('sortorder', 'aZ09comma') ?: 'ASC';
 $page = GETPOSTISSET('pageplusone') ? (GETPOSTINT('pageplusone') - 1) : GETPOSTINT('page');
+$contextpage = 'dunninglist';
+$search_company = trim(GETPOST('search_company', 'alphanohtml'));
 $search_level = GETPOSTINT('search_level');
 $search_sale = GETPOSTINT('search_sale');
 $search_amount = GETPOST('search_amount', 'alpha');
 $search_due = GETPOSTINT('search_due');
 $agings = Dunning::AGINGS;
 unset($agings['aging_notdue']);	// A list of the work to do on late invoices, not a balance of all the invoices to pay
+// Columns of the list, in order, that the user can hide like in the lists of the core
+$arrayfields = array('socname' => array('label' => 'Customer', 'checked' => '1'), 'nb' => array('label' => 'Invoices', 'checked' => '1', 'css' => 'right'),
+	'remain' => array('label' => 'DunningAmountReminded', 'checked' => '1', 'css' => 'right'));
+foreach ($agings as $key => $label) {
+	$arrayfields[$key] = array('label' => $label, 'checked' => '1', 'css' => 'right');
+}
+$arrayfields['leveldate'] = array('label' => 'DunningLevelReached', 'checked' => '1');
+$arrayfields['promise'] = array('label' => 'DunningPromise', 'checked' => '1', 'css' => 'center');
+$arrayfields['nextdate'] = array('label' => 'DunningNextReminder', 'checked' => '1');
 if (!in_array($sortfield, array_merge(array('socname', 'nb', 'remain', 'leveldate', 'promise', 'nextdate'), array_keys($agings)))) {
 	$sortfield = 'nextdate';
 }
@@ -98,6 +109,7 @@ if ($page < 0 || $removefilter || GETPOST('button_search_x', 'alpha') || GETPOST
 	$page = 0;
 }
 if ($removefilter) {
+	$search_company = '';
 	$search_level = 0;
 	$search_sale = 0;
 	$search_amount = '';
@@ -108,7 +120,7 @@ if (!$user->hasRight('societe', 'client', 'voir')) {
 	$search_sale = $user->id;
 }
 
-$param = ($limit != $conf->liste_limit ? '&limit='.((int) $limit) : '');
+$param = ($limit != $conf->liste_limit ? '&limit='.((int) $limit) : '').($search_company !== '' ? '&search_company='.urlencode($search_company) : '');
 $param .= ($search_level > 0 ? '&search_level='.$search_level : '').($search_sale > 0 ? '&search_sale='.$search_sale : '');
 $param .= ($search_amount !== '' ? '&search_amount='.urlencode($search_amount) : '').($search_due ? '&search_due=1' : '');
 
@@ -145,6 +157,9 @@ $parameters = array('arrayofselected' => $toselect);
 $reshook = $hookmanager->executeHooks('doActions', $parameters, $dunning, $action); // Note that $action and $object may have been modified by some hooks
 if ($reshook < 0) {
 	setEventMessages($hookmanager->error, $hookmanager->errors, 'errors');
+}
+if (empty($reshook)) {	// Columns chosen by the user
+	include DOL_DOCUMENT_ROOT.'/core/actions_changeselectedfields.inc.php';
 }
 
 if (empty($reshook) && $confirm == 'yes' && $permissiontowrite && in_array($action, array('confirm_remind', 'confirm_summary', 'confirm_promise', 'confirm_donotremind')) && !empty($toselect)) {
@@ -187,7 +202,8 @@ if (!is_array($customers)) {
 	$customers = array();
 }
 foreach ($customers as $socid => $customer) {
-	if (($search_level > 0 && (!$customer['level'] || $customer['level']->rowid != $search_level))
+	if (($search_company !== '' && mb_stripos(dol_string_unaccent($customer['socname']), dol_string_unaccent($search_company)) === false)	// Without accents, like the search of the core
+		|| ($search_level > 0 && (!$customer['level'] || $customer['level']->rowid != $search_level))
 		|| ($search_amount !== '' && $customer['remain'] < (float) price2num($search_amount))) {
 		unset($customers[$socid]);
 	}
@@ -218,6 +234,7 @@ llxHeader('', $title, '', '', 0, 0, '', '', '', 'mod-dunning page-list');
 
 print '<form method="POST" id="searchFormList" action="'.$_SERVER['PHP_SELF'].'">';
 print '<input type="hidden" name="token" value="'.newToken().'">';
+print '<input type="hidden" name="formfilteraction" id="formfilteraction" value="list">';
 print '<input type="hidden" name="sortfield" value="'.dolPrintHTMLForAttribute($sortfield).'">';
 print '<input type="hidden" name="sortorder" value="'.dolPrintHTMLForAttribute($sortorder).'">';
 print '<input type="hidden" name="page" value="'.((int) $page).'">';
@@ -247,35 +264,48 @@ if ($dunning->isCoreJobEnabled()) {	// Nothing can be sent from the module
 	print info_admin($langs->trans('DunningJobDisabled'), 0, 0, 'info');
 }
 
-$moreforfilter = '<div class="divsearchfield">'.$langs->trans('DunningLevelReached').': '.$form->selectarray('search_level', $levellabels, $search_level, 1, 0, 0, '', 0, 0, 0, '', 'maxwidth200').'</div>';
-if ($user->hasRight('user', 'user', 'lire')) {
-	$moreforfilter .= '<div class="divsearchfield">'.$langs->trans('SalesRepresentatives').': '.$formother->select_salesrepresentatives($search_sale, 'search_sale', $user, 0, 1, 'maxwidth200').'</div>';
+$moreforfilter = '';
+if ($user->hasRight('user', 'user', 'lire')) {	// No column of its own, like in the list of invoices
+	$moreforfilter = '<div class="divsearchfield">'.$langs->trans('SalesRepresentatives').': '.$formother->select_salesrepresentatives($search_sale, 'search_sale', $user, 0, 1, 'maxwidth200').'</div>';
+	print '<div class="liste_titre liste_titre_bydiv centpercent">'.$moreforfilter.'</div>';
 }
-$moreforfilter .= '<div class="divsearchfield">'.$langs->trans('DunningAmountReminded').' &gt;= <input type="text" class="width75" name="search_amount" value="'.dolPrintHTMLForAttribute($search_amount).'"></div>';
-$moreforfilter .= '<div class="divsearchfield"><input type="checkbox" id="search_due" name="search_due" value="1"'.($search_due ? ' checked' : '').'> <label for="search_due">'.$langs->trans('DunningCustomersToRemind').'</label></div>';
-print '<div class="liste_titre liste_titre_bydiv centpercent">'.$moreforfilter.'</div>';
+$selectedfields = $form->multiSelectArrayWithCheckbox('selectedfields', $arrayfields, $contextpage, $conf->main_checkbox_left_column);	// Also applies the choice of the user to $arrayfields
+$selectedfields .= ($massactionbutton ? $form->showCheckAddButtons('checkforselect', 1) : '');
+$left = $conf->main_checkbox_left_column;
+$searchfields = array(
+	'socname' => '<input type="text" class="flat maxwidth100" name="search_company" value="'.dolPrintHTMLForAttribute($search_company).'">',
+	'remain' => '<input type="text" class="flat maxwidth50" name="search_amount" value="'.dolPrintHTMLForAttribute($search_amount).'" placeholder="&gt;=">',
+	'leveldate' => $form->selectarray('search_level', $levellabels, $search_level, 1, 0, 0, '', 0, 0, 0, '', 'maxwidth150'),
+	'nextdate' => '<input type="checkbox" id="search_due" name="search_due" value="1"'.($search_due ? ' checked' : '').'> <label for="search_due">'.$langs->trans('DunningCustomersToRemind').'</label>',
+);
 
 print '<div class="div-table-responsive">';
-print '<table class="tagtable nobottomiftotal liste">';
-print '<tr class="liste_titre_filter"><td class="liste_titre" colspan="'.(6 + count($agings)).'"></td>';
-$parameters = array();
+print '<table class="tagtable nobottomiftotal noborder liste'.($moreforfilter ? ' listwithfilterbefore' : '').'">';
+print '<tr class="liste_titre_filter">'.($left ? '<td class="liste_titre center maxwidthsearch">'.$form->showFilterButtons('left').'</td>' : '');
+foreach ($arrayfields as $key => $field) {
+	if (!empty($field['checked'])) {
+		print '<td class="liste_titre'.(empty($field['css']) ? '' : ' '.$field['css']).'">'.(isset($searchfields[$key]) ? $searchfields[$key] : '').'</td>';
+	}
+}
+$parameters = array('arrayfields' => $arrayfields);
 $reshook = $hookmanager->executeHooks('printFieldListOption', $parameters, $dunning, $action); // Note that $action and $object may have been modified by hook
 print $hookmanager->resPrint;
-print '<td class="liste_titre center maxwidthsearch">'.$form->showFilterButtons().'</td></tr>';
+print ($left ? '' : '<td class="liste_titre center maxwidthsearch">'.$form->showFilterButtons().'</td>').'</tr>';
 print '<tr class="liste_titre">';
-print_liste_field_titre('Customer', $_SERVER['PHP_SELF'], 'socname', '', $param, '', $sortfield, $sortorder);
-print_liste_field_titre('Invoices', $_SERVER['PHP_SELF'], 'nb', '', $param, '', $sortfield, $sortorder, 'right ');
-print_liste_field_titre('DunningAmountReminded', $_SERVER['PHP_SELF'], 'remain', '', $param, '', $sortfield, $sortorder, 'right ');
-foreach ($agings as $key => $label) {
-	print_liste_field_titre($label, $_SERVER['PHP_SELF'], $key, '', $param, '', $sortfield, $sortorder, 'right ');
+if ($left) {
+	print_liste_field_titre($selectedfields, $_SERVER['PHP_SELF'], '', '', '', '', $sortfield, $sortorder, 'center maxwidthsearch ');
 }
-print_liste_field_titre('DunningLevelReached', $_SERVER['PHP_SELF'], 'leveldate', '', $param, '', $sortfield, $sortorder);
-print_liste_field_titre('DunningPromise', $_SERVER['PHP_SELF'], 'promise', '', $param, '', $sortfield, $sortorder, 'center ');
-print_liste_field_titre('DunningNextReminder', $_SERVER['PHP_SELF'], 'nextdate', '', $param, '', $sortfield, $sortorder);
-$parameters = array('param' => $param, 'sortfield' => $sortfield, 'sortorder' => $sortorder);
+foreach ($arrayfields as $key => $field) {
+	if (!empty($field['checked'])) {
+		print_liste_field_titre($field['label'], $_SERVER['PHP_SELF'], $key, '', $param, '', $sortfield, $sortorder, (empty($field['css']) ? '' : $field['css'].' '));
+	}
+}
+$parameters = array('arrayfields' => $arrayfields, 'param' => $param, 'sortfield' => $sortfield, 'sortorder' => $sortorder);
 $reshook = $hookmanager->executeHooks('printFieldListTitle', $parameters, $dunning, $action); // Note that $action and $object may have been modified by hook
 print $hookmanager->resPrint;
-print_liste_field_titre($massactionbutton ? $form->showCheckAddButtons('checkforselect', 1) : '', $_SERVER['PHP_SELF'], '', '', '', '', $sortfield, $sortorder, 'center maxwidthsearch ');
+if (!$left) {
+	print_liste_field_titre($selectedfields, $_SERVER['PHP_SELF'], '', '', '', '', $sortfield, $sortorder, 'center maxwidthsearch ');
+}
 print '</tr>';
 
 foreach ($customers as $customer) {	// The credits of the customers of the page, 2 queries of the core each: bounded by the page
@@ -285,36 +315,49 @@ foreach ($customers as $customer) {	// The credits of the customers of the page,
 	$credit = (float) $societe->getAvailableDiscounts();
 	$creditnotes = (int) $societe->getOpenCreditNotesNotYetConvertedIntoDiscount();
 	$warning = ($credit > 0 ? $langs->transnoentitiesnoconv('DunningCustomerCredit', price($credit, 0, $langs, 1, -1, -1, $conf->currency)).' ' : '').($creditnotes > 0 ? $langs->transnoentitiesnoconv('DunningCustomerCreditNotes', (string) $creditnotes) : '');
-	print '<tr class="oddeven">';
-	print '<td class="tdoverflowmax200">'.$societe->getNomUrl(1, 'customer').($warning !== '' ? ' '.img_warning($warning) : '').'</td>';
-	print '<td class="right">'.$customer['nb'].'</td>';
-	print '<td class="right amount">'.price($customer['remain'], 0, $langs, 1, -1, -1, $conf->currency).'</td>';
+	$cells = array(
+		'socname' => '<td class="tdoverflowmax200">'.$societe->getNomUrl(1, 'customer').($warning !== '' ? ' '.img_warning($warning) : '').'</td>',
+		'nb' => '<td class="right">'.$customer['nb'].'</td>',
+		'remain' => '<td class="right amount">'.price($customer['remain'], 0, $langs, 1, -1, -1, $conf->currency).'</td>',
+	);
 	foreach (array_keys($agings) as $key) {
-		print '<td class="right amount">'.($customer[$key] ? price($customer[$key], 0, $langs, 1, -1, -1, $conf->currency) : '').'</td>';
+		$cells[$key] = '<td class="right amount">'.($customer[$key] ? price($customer[$key], 0, $langs, 1, -1, -1, $conf->currency) : '').'</td>';
 	}
-	print '<td>'.($customer['level'] ? dolPrintLabel($customer['level']->label).' <span class="opacitymedium">'.dol_print_date($customer['leveldate'], 'day').'</span>' : '').'</td>';
-	print '<td class="center">'.($customer['promise'] ? dol_print_date($customer['promise'], 'day') : '');
-	print ($customer['promisestatus'] ? ' <span class="opacitymedium">('.$langs->trans('DunningPromise'.dol_ucfirst($customer['promisestatus'])).')</span>' : '').'</td>';
-	print '<td>';
+	$cells['leveldate'] = '<td>'.($customer['level'] ? dolPrintLabel($customer['level']->label).' <span class="opacitymedium">'.dol_print_date($customer['leveldate'], 'day').'</span>' : '').'</td>';
+	$cells['promise'] = '<td class="center">'.($customer['promise'] ? dol_print_date($customer['promise'], 'day') : '');
+	$cells['promise'] .= ($customer['promisestatus'] ? ' <span class="opacitymedium">('.$langs->trans('DunningPromise'.dol_ucfirst($customer['promisestatus'])).')</span>' : '').'</td>';
+	$cells['nextdate'] = '<td>';
 	if ($customer['next']) {
-		print ($customer['due'] ? img_warning().' ' : '').dolPrintLabel($customer['next']->label).' <span class="opacitymedium">'.dol_print_date($customer['nextdate'], 'day');
-		print ($customer['byhand'] ? ' ('.$langs->trans('DunningByHand').')' : '').'</span>';
+		$cells['nextdate'] .= ($customer['due'] ? img_warning().' ' : '').dolPrintLabel($customer['next']->label).' <span class="opacitymedium">'.dol_print_date($customer['nextdate'], 'day');
+		$cells['nextdate'] .= ($customer['byhand'] ? ' ('.$langs->trans('DunningByHand').')' : '').'</span>';
 	}
-	print '</td>';
-	$parameters = array('customer' => $customer);
+	$cells['nextdate'] .= '</td>';
+	$checkbox = '<td class="nowrap center"><input id="cb'.$customer['socid'].'" class="flat checkforselect" type="checkbox" name="toselect[]" value="'.$customer['socid'].'"'.(in_array($customer['socid'], $toselect) ? ' checked' : '').'></td>';
+	print '<tr class="oddeven">'.($left ? $checkbox : '');
+	foreach ($arrayfields as $key => $field) {
+		print (empty($field['checked']) ? '' : $cells[$key]);
+	}
+	$parameters = array('customer' => $customer, 'arrayfields' => $arrayfields);
 	$reshook = $hookmanager->executeHooks('printFieldListValue', $parameters, $dunning, $action); // Note that $action and $object may have been modified by hook
 	print $hookmanager->resPrint;
-	print '<td class="nowrap center"><input id="cb'.$customer['socid'].'" class="flat checkforselect" type="checkbox" name="toselect[]" value="'.$customer['socid'].'"'.(in_array($customer['socid'], $toselect) ? ' checked' : '').'></td>';
-	print '</tr>';
+	print ($left ? '' : $checkbox).'</tr>';
 }
 if ($num == 0) {
-	print '<tr><td colspan="'.(7 + count($agings)).'"><span class="opacitymedium">'.$langs->trans('NoRecordFound').'</span></td></tr>';
-} else {
-	print '<tr class="liste_total"><td>'.$langs->trans('Total').'</td><td></td>';
-	foreach ($totals as $total) {
-		print '<td class="right amount">'.price($total, 0, $langs, 1, -1, -1, $conf->currency).'</td>';
+	print '<tr><td colspan="'.(1 + count(array_filter(array_column($arrayfields, 'checked')))).'"><span class="opacitymedium">'.$langs->trans('NoRecordFound').'</span></td></tr>';
+} else {	// The label in the first cell without a total, like the lists of the core
+	$label = $langs->trans('Total');
+	print '<tr class="liste_total">';
+	if ($left) {
+		print '<td>'.$label.'</td>';
+		$label = '';
 	}
-	print '<td colspan="4"></td></tr>';
+	foreach ($arrayfields as $key => $field) {
+		if (!empty($field['checked'])) {
+			print (isset($totals[$key]) ? '<td class="right amount">'.price($totals[$key], 0, $langs, 1, -1, -1, $conf->currency).'</td>' : '<td>'.$label.'</td>');
+			$label = '';
+		}
+	}
+	print ($left ? '' : '<td></td>').'</tr>';
 }
 print '</table>';
 print '</div>';

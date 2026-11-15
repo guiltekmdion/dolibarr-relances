@@ -120,9 +120,9 @@ if (empty($reshook) && $action == 'confirm_promise' && $confirm == 'yes' && $per
 	header('Location: '.$_SERVER['PHP_SELF'].'?id='.$object->id);
 	exit;
 }
-if (empty($reshook) && $action == 'confirm_record' && $confirm == 'yes' && $permissiontowrite && $row) {
+if (empty($reshook) && in_array($action, array('confirm_record', 'confirm_call')) && $confirm == 'yes' && $permissiontowrite && $row) {
 	// Noon of the day in the time zone of the server, like the dates of the reminders: the same day for every reader
-	$result = $dunning->recordReminder($user, $row, GETPOSTINT('recordlevel'), GETPOSTDATE('recorddate', '12:00:00', 'tzserver'));
+	$result = $dunning->recordReminder($user, $row, ($action == 'confirm_record' ? GETPOSTINT('recordlevel') : 0), GETPOSTDATE('recorddate', '12:00:00', 'tzserver'), GETPOST('recordnote', 'alphanohtml'));
 	setEventMessages($result < 0 ? $dunning->error : $langs->trans($result ? 'RecordSaved' : 'DunningAlreadyRecorded'), null, ($result < 0 ? 'errors' : 'mesgs'));
 	header('Location: '.$_SERVER['PHP_SELF'].'?id='.$object->id);
 	exit;
@@ -189,17 +189,21 @@ if ($action == 'promise' && $row) {
 	);
 	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('DunningPromise'), '', 'confirm_promise', $formquestion, 0, 1);
 }
-if ($action == 'record' && $row) {
-	$levellabels = array();
-	$levels = $dunning->fetchLevels();
-	foreach (is_array($levels) ? $levels : array() as $level) {
-		$levellabels[$level->rowid] = $level->label;
-	}
+if (in_array($action, array('record', 'call')) && $row) {
 	$formquestion = array(
-		array('type' => 'select', 'name' => 'recordlevel', 'label' => $langs->trans('DunningLevelReached'), 'values' => $levellabels, 'default' => ($row->next ? $row->next->rowid : '')),
 		array('type' => 'date', 'name' => 'recorddate', 'label' => $langs->trans('Date'), 'value' => dol_now()),
+		array('type' => 'text', 'name' => 'recordnote', 'label' => $langs->trans('Note')),
 	);
-	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans('DunningRecordReminder'), $langs->trans('DunningRecordReminderHelp'), 'confirm_record', $formquestion, 0, 1);
+	if ($action == 'record') {
+		$levellabels = array();
+		$levels = $dunning->fetchLevels();
+		foreach (is_array($levels) ? $levels : array() as $level) {
+			$levellabels[$level->rowid] = $level->label;
+		}
+		array_unshift($formquestion, array('type' => 'select', 'name' => 'recordlevel', 'label' => $langs->trans('DunningLevelReached'), 'values' => $levellabels, 'default' => ($row->next ? $row->next->rowid : '')));
+	}
+	$title = ($action == 'record' ? 'DunningRecordReminder' : 'DunningRecordCall');
+	print $form->formconfirm($_SERVER['PHP_SELF'].'?id='.$object->id, $langs->trans($title), $langs->trans($title.'Help'), 'confirm_'.$action, $formquestion, 0, 1);
 }
 $amounts = ($row ? $dunning->getPenalties($row, dol_now()) : array('days' => 0, 'penalties' => 0.0, 'indemnity' => 0.0));
 if ($action == 'penaltyinvoice' && $row) {
@@ -252,6 +256,7 @@ if ($row && $row->next) {
 if ($row) {
 	print dolGetButtonAction('', $langs->trans('DunningPromise'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=promise&token='.newToken(), '', $permissiontowrite);
 	print dolGetButtonAction('', $langs->trans('DunningRecordReminder'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=record&token='.newToken(), '', $permissiontowrite);
+	print dolGetButtonAction('', $langs->trans('DunningRecordCall'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=call&token='.newToken(), '', $permissiontowrite);
 }
 if ($row && !$row->penaltyinvoice && $amounts['penalties'] + $amounts['indemnity'] > 0) {
 	print dolGetButtonAction('', $langs->trans('DunningCreatePenaltyInvoice'), 'default', $_SERVER['PHP_SELF'].'?id='.$object->id.'&action=penaltyinvoice&token='.newToken(), '', $permissiontowrite && $user->hasRight('facture', 'creer'));

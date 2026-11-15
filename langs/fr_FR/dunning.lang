@@ -161,3 +161,5 @@ DunningRecordReminder=Noter une relance déjà faite
 DunningRecordReminderHelp=Une relance faite hors du module (à la main, par téléphone, par courrier) : rien n'est envoyé, les relances reprennent au niveau suivant.
 DunningRecordedLabel=Niveau de relance « %s » fait hors du module
 DunningAlreadyRecorded=Ce niveau est déjà noté pour cette facture
+DunningRecordCall=Noter un appel
+DunningRecordCallHelp=Un appel au client : il va dans l'historique et dans l'agenda, le niveau de relance ne change pas.

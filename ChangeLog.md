@@ -2,7 +2,9 @@
 
 ## 1.7.0
 
-- Tab of an invoice: "Record a reminder already sent" for a reminder sent outside the module (by hand, by phone, by post): the level and the day, no email. The reminders go on from the next level, after the gap; a level is recorded once per invoice (and installment).
+- Tab of an invoice: "Record a reminder already sent" for a reminder sent outside the module (by hand, by phone, by post): the level and the day, no email. The reminders go on from the next level, after the gap; a level is recorded once per invoice (and installment). A note can be added.
+- Tab of an invoice: "Record a phone call": the day and a note, as a Phone call event of the agenda, in the history of the tab; the reminder level does not change.
+- List like the lists of Dolibarr: a search field under each column (customer, amount reminded, level reached, customers to remind), the columns to show chosen by each user, the checkbox column on the side set in Dolibarr; the sales representative stays above the list.
 
 ## 1.6.0
 
